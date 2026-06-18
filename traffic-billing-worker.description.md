@@ -31,12 +31,13 @@
 
 | 方法 路径 | 鉴权 | 说明 |
 |---|---|---|
-| `GET /ui` | 公开(出登录页) | 配置页 |
-| `GET /list`、`GET /summary` | **公开** | 数据接口,探针前端拉取 |
+| `GET /list`、`GET /summary` | **公开** | 数据接口，供探针前端 / StatusShow 拉取 |
 | `GET /config?uuid=` | 需登录 | 读配置 |
 | `POST /config` | 需登录 | 改配置 |
 | `POST /audit` | 需登录 | 立即审计 |
 | `POST /reset` `{uuid}` | 需登录 | 重置本期 |
+
+> 图形配置面板已移到 `traffic-monitor` 扩展（iframe），经 `js-worker_run` 调本 worker 的 `onCall`，**不再有内置 `/ui` 页**。`/list`、`/summary` 仍保留供只读拉取。
 
 ## 计费规则
 

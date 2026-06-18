@@ -9,11 +9,21 @@
       "entry": "index.html"
     }
   ],
-  "limits": [],
-  "version": "1.0",
-  "description": "节点离线/上线、到期、流量超限事件的 Telegram 通知配置(前端壳,数据由 notify-worker 提供)",
+  "limits": [
+    {
+      "permissions": [
+        { "js_worker": "run_defined_js_worker" },
+        { "js_result": { "read": "notify-worker" } }
+      ],
+      "scopes": [
+        { "js_worker": "notify-worker" }
+      ]
+    }
+  ],
+  "version": "2.0",
+  "description": "节点离线/上线、到期、流量超额事件的 Telegram 通知；扩展内置配置面板（token 鉴权），逻辑由 notify-worker 提供",
   "extension_version": 1,
-  "author": "",
+  "author": "laozig",
   "repository": "",
   "homepage": "",
   "license": "MIT"

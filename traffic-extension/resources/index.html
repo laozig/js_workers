@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>流量监控</title>
+  <link rel="stylesheet" href="./assets/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="title"><span class="dot"></span> 流量监控 <span id="scope-label" class="muted"></span></div>
+      <div class="actions">
+        <input id="search" class="input" style="width:160px" placeholder="搜索节点…" />
+        <button id="audit" class="btn">立即审计</button>
+        <button id="refresh" class="btn">刷新</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <!-- 全局视图：所有节点 -->
+    <section id="view-all">
+      <div class="summary" id="summary"></div>
+      <table class="ctab">
+        <thead>
+          <tr><th>节点</th><th>监控</th><th>本期用量</th><th>方向</th><th>起算日</th><th></th></tr>
+        </thead>
+        <tbody id="rows"><tr><td colspan="6" class="muted center">加载中…</td></tr></tbody>
+      </table>
+    </section>
+
+    <!-- 单机视图：仅当前机器 -->
+    <section id="view-single" class="hidden">
+      <div class="single-card" id="single-card">
+        <div class="single-head">
+          <span class="name" id="sg-name">—</span>
+          <span id="sg-badge"></span>
+        </div>
+        <div class="single-usage" id="sg-usage"></div>
+        <div class="single-meta" id="sg-meta"></div>
+        <div class="row-actions" style="margin-top:16px">
+          <button id="sg-config" class="btn btn-primary btn-sm">配置</button>
+          <button id="sg-reset" class="btn btn-danger btn-sm">重置本期</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 节点配置 -->
+  <div id="cfgmodal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head"><span id="cfg-title">节点配置</span><button id="cfg-close" class="btn">关闭</button></div>
+      <div class="cfg-form">
+        <label class="row-check"><input type="checkbox" id="cfg-enabled" /> 启用流量监控</label>
+        <label>计费方向
+          <select id="cfg-mode" class="input">
+            <option value="outbound">出网（上传 ↑）</option>
+            <option value="inbound">入网（下载 ↓）</option>
+            <option value="both">双向 ↕</option>
+          </select>
+        </label>
+        <label>起算日（每月 1–31，短月自动落月末）
+          <input id="cfg-day" class="input" type="number" min="1" max="31" />
+        </label>
+        <label>配额 GB（留空 = 不限额 / 不告警）
+          <input id="cfg-quota" class="input" type="number" min="0" step="0.1" placeholder="留空不限额" />
+        </label>
+      </div>
+      <div id="cfg-error" class="banner hidden"></div>
+      <div class="confirm-actions">
+        <button id="cfg-reset" class="btn btn-danger">重置本期</button>
+        <span style="flex:1"></span>
+        <button id="cfg-cancel" class="btn">取消</button>
+        <button id="cfg-save" class="btn btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 确认 -->
+  <div id="confirmmodal" class="modal hidden">
+    <div class="modal-box confirm-box">
+      <div class="modal-head"><span>确认操作</span></div>
+      <div id="confirm-msg" class="confirm-msg"></div>
+      <div class="confirm-actions">
+        <button id="confirm-cancel" class="btn">取消</button>
+        <button id="confirm-ok" class="btn btn-primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./assets/main.js"></script>
+</body>
+</html>

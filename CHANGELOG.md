@@ -2,6 +2,22 @@
 
 本文件记录 `js_workers` 仓库的主要变更。
 
+## [1.1.0] - 2026-06-18
+
+### Added
+- `docker-extension/` — Docker 管理扩展（容器/镜像/运行，execute + docker CLI）
+- `process-extension/` — 进程管理扩展（进程 ps/kill、端口 ss、systemd、pm2、任意日志 tail；execute）
+- `log-cleanup-worker.js` — 日志清理 Worker（truncate 各机 NodeGet 日志，自助定时）
+- `stream-unlock-worker.js` — 流媒体解锁检测 Worker（YouTube/Netflix v4/v6）
+
+### Changed
+- 重命名 `extension/` → `traffic-extension/`（与 `*-extension` 命名统一）
+- `notify`（worker + 扩展）迁移到 NodeGet Token 鉴权：移除内置 `/ui` + `route_secret`，扩展改为自包含 iframe
+- `traffic-extension` 同样改为 token 鉴权 iframe（不再跳转 worker `/ui`）
+
+### Fixed
+- 进程管理 pm2 日志改为直接 tail `pm_out/err_log_path` 文件，修复 `pm2 logs --nostream` 在非 TTY 下只显示 `[TAILING]` 横幅、无内容的问题
+
 ## [1.0.0] - 2026-06-16
 
 ### Added

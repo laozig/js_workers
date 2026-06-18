@@ -1,41 +1,115 @@
 <!doctype html>
-<html lang="zh">
+<html lang="zh" data-theme="dark">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>消息通知</title>
-  <style>
-    *{box-sizing:border-box}
-    html,body{margin:0;height:100%}
-    body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;
-      font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#e8ebf2;
-      background:radial-gradient(800px 500px at 50% 0%,rgba(124,131,255,.18),transparent),#0a0e1a}
-    .ring{width:42px;height:42px;border-radius:50%;border:3px solid rgba(255,255,255,.12);
-      border-top-color:#8b5cf6;animation:spin .8s linear infinite}
-    @keyframes spin{to{transform:rotate(360deg)}}
-    .t{font-size:17px;font-weight:800;letter-spacing:.3px;
-      background:linear-gradient(90deg,#a5b4fc,#c4b5fd);-webkit-background-clip:text;background-clip:text;color:transparent}
-    .s{font-size:12px;color:#8b93a7}
-    .fallback{font-size:12px;color:#8b93a7;text-decoration:underline;margin-top:4px}
-  </style>
+  <link rel="stylesheet" href="./assets/style.css" />
 </head>
 <body>
-  <div class="ring"></div>
-  <div class="t">消息通知</div>
-  <div class="s">正在加载消息通知配置…</div>
-  <a class="fallback" id="fb" style="display:none">点此手动进入</a>
-  <script>
-    (function () {
-      // 同源跳转到 notify-worker 的 /ui(worker 用自身 env.token,无需扩展 token)
-      // 与 notify-worker 的 route_name 对应,改了 route_name 同步这里
-      var q = new URLSearchParams(location.search);
-      var s = q.get("s") || q.get("secret") || "";   // 私密链接密钥(设了 route_secret 时)透传给 /ui
-      var url = "/nodeget/worker-route/notify/ui" + (s ? "?s=" + encodeURIComponent(s) : "");
-      var fb = document.getElementById("fb");
-      fb.href = url;
-      setTimeout(function () { fb.style.display = "block"; }, 1500);
-      location.replace(url);
-    })();
-  </script>
+  <div id="app">
+    <header class="topbar">
+      <div class="title"><span class="dot"></span> 消息通知</div>
+      <div class="actions">
+        <button id="test" class="btn btn-sm">发送测试</button>
+        <button id="run" class="btn btn-sm">立即检测</button>
+        <button id="save" class="btn btn-primary btn-sm">保存配置</button>
+      </div>
+    </header>
+
+    <div id="status" class="statusbar idle"><span class="pip"></span><span id="status-text">加载中…</span></div>
+    <div id="banner" class="banner hidden"></div>
+
+    <!-- 总开关 -->
+    <div class="card">
+      <div class="head">
+        <div>
+          <h3>
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>
+            开启通知
+          </h3>
+          <div class="d">总开关。关闭后定时检测不会发送任何通知。</div>
+        </div>
+        <label class="sw"><input type="checkbox" id="enabled" /><span class="sl"></span></label>
+      </div>
+    </div>
+
+    <!-- Telegram -->
+    <div class="card">
+      <h3>
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+        Telegram 发送设置
+      </h3>
+      <div class="d">从 @BotFather 获取 Bot Token；Chat ID 可填数字 id 或 @频道名。</div>
+      <div class="body">
+        <label class="f">Bot Token<span class="req">*</span></label>
+        <input id="bot_token" class="input" placeholder="123456:ABC-DEF..." autocomplete="off" />
+        <div class="grid2">
+          <div>
+            <label class="f">Chat ID<span class="req">*</span></label>
+            <input id="chat_id" class="input" placeholder="@yourchannel 或 123456789" />
+          </div>
+          <div>
+            <label class="f">话题 ID<span class="opt">可选 · 超级群</span></label>
+            <input id="message_thread_id" class="input" placeholder="可选" />
+          </div>
+        </div>
+        <label class="f">请求端点<span class="req">*</span></label>
+        <input id="endpoint" class="input" placeholder="https://api.telegram.org/bot" />
+        <div class="hint">通常为 https://api.telegram.org/bot；被墙时可填反代地址。</div>
+      </div>
+    </div>
+
+    <!-- 事件 -->
+    <div class="card">
+      <h3>
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" x2="4" y1="22" y2="15"/></svg>
+        通知事件
+      </h3>
+      <div class="d">选择要推送的事件类型。</div>
+      <div class="body events">
+        <label class="ev" id="ev_offline_row">
+          <span class="emo">🔴</span>
+          <span class="meta"><div class="n">节点离线</div><div class="s">90 秒无上报判离线；同轮多台合并一条</div></span>
+          <input type="checkbox" id="ev_offline" />
+        </label>
+        <label class="ev" id="ev_online_row">
+          <span class="emo">🟢</span>
+          <span class="meta"><div class="n">恢复在线</div><div class="s">离线节点重新上报后通知</div></span>
+          <input type="checkbox" id="ev_online" />
+        </label>
+        <label class="ev" id="ev_expire_row">
+          <span class="emo">⏰</span>
+          <span class="meta"><div class="n">到期提醒</div><div class="s">临期每天提醒一次，续费即停</div></span>
+          <input type="checkbox" id="ev_expire" />
+        </label>
+        <label class="ev" id="ev_traffic_row">
+          <span class="emo">📊</span>
+          <span class="meta"><div class="n">流量超配额</div><div class="s">需 traffic-billing-worker；80% 起每 +5% 报一次</div></span>
+          <input type="checkbox" id="ev_traffic" />
+        </label>
+        <div style="margin-top:4px">
+          <label class="f">到期提前提醒（天）</label>
+          <input type="number" id="expire_days" class="input" min="1" max="90" value="7" style="max-width:160px" />
+        </div>
+      </div>
+    </div>
+
+    <!-- 模板 -->
+    <div class="card">
+      <h3>
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>
+        消息模板
+      </h3>
+      <div class="d">推送内容模板，支持下列变量。</div>
+      <div class="body">
+        <textarea id="template" class="input"></textarea>
+        <div class="tags">可用变量：<code>{{emoji}}</code> <code>{{event}}</code> <code>{{client}}</code>（节点名） <code>{{time}}</code>（CST） <code>{{type}}</code></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="./assets/main.js"></script>
 </body>
 </html>

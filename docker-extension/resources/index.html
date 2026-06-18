@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Docker 管理器</title>
+  <link rel="stylesheet" href="./assets/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="title"><span class="dot"></span> Docker · <span id="node-label">—</span></div>
+      <div class="actions">
+        <span id="info-summary" class="muted"></span>
+        <button id="refresh" class="btn">刷新</button>
+      </div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="containers">容器</button>
+      <button class="tab" data-tab="images">镜像</button>
+    </div>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <!-- 容器视图 -->
+    <section id="view-containers">
+      <div class="toolbar">
+        <button id="run-open" class="btn btn-primary btn-sm">+ 运行容器</button>
+      </div>
+      <table class="ctab">
+        <thead>
+          <tr><th>名称</th><th>镜像</th><th>状态</th><th>运行情况</th><th>端口</th><th></th></tr>
+        </thead>
+        <tbody id="rows"><tr><td colspan="6" class="muted center">加载中…</td></tr></tbody>
+      </table>
+    </section>
+
+    <!-- 镜像视图 -->
+    <section id="view-images" class="hidden">
+      <div class="toolbar">
+        <input id="pull-input" class="input grow" placeholder="镜像名，如 nginx:latest" />
+        <button id="pull-btn" class="btn btn-primary btn-sm">拉取</button>
+      </div>
+      <table class="ctab">
+        <thead>
+          <tr><th>仓库</th><th>标签</th><th>镜像 ID</th><th>大小</th><th></th></tr>
+        </thead>
+        <tbody id="img-rows"><tr><td colspan="5" class="muted center">—</td></tr></tbody>
+      </table>
+    </section>
+  </div>
+
+  <!-- 日志 -->
+  <div id="logmodal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span id="log-title"></span>
+        <button id="log-close" class="btn">关闭</button>
+      </div>
+      <pre id="log-body" class="logs"></pre>
+    </div>
+  </div>
+
+  <!-- 确认 -->
+  <div id="confirmmodal" class="modal hidden">
+    <div class="modal-box confirm-box">
+      <div class="modal-head"><span>确认操作</span></div>
+      <div id="confirm-msg" class="confirm-msg"></div>
+      <div class="confirm-actions">
+        <button id="confirm-cancel" class="btn">取消</button>
+        <button id="confirm-ok" class="btn btn-primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 运行新容器 -->
+  <div id="runmodal" class="modal hidden">
+    <div class="modal-box run-box">
+      <div class="modal-head"><span>运行新容器</span><button id="run-close" class="btn">关闭</button></div>
+      <div class="run-form">
+        <label>镜像 <span class="req">*</span><input id="run-image" class="input" placeholder="nginx:latest" /></label>
+        <label>容器名<input id="run-name" class="input" placeholder="可选" /></label>
+        <label>端口映射（每行一条 host:container）<textarea id="run-ports" class="input" rows="2" placeholder="8080:80"></textarea></label>
+        <label>卷映射（每行一条 host:container）<textarea id="run-vols" class="input" rows="2" placeholder="/data:/usr/share/nginx/html"></textarea></label>
+        <label>环境变量（每行一条 KEY=VALUE）<textarea id="run-env" class="input" rows="2" placeholder="TZ=Asia/Shanghai"></textarea></label>
+        <label>重启策略
+          <select id="run-restart" class="input">
+            <option value="">默认（no）</option>
+            <option value="unless-stopped">unless-stopped</option>
+            <option value="always">always</option>
+            <option value="on-failure">on-failure</option>
+          </select>
+        </label>
+        <label>启动命令（可选，空格分隔）<input id="run-cmd" class="input" placeholder="可选，如 nginx -g 'daemon off;' 不支持引号" /></label>
+      </div>
+      <div id="run-error" class="banner hidden"></div>
+      <div class="confirm-actions">
+        <button id="run-cancel" class="btn">取消</button>
+        <button id="run-submit" class="btn btn-primary">运行</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./assets/main.js"></script>
+</body>
+</html>

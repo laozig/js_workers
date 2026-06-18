@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>进程管理器</title>
+  <link rel="stylesheet" href="./assets/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="title"><span class="dot"></span> 进程 · <span id="node-label">—</span></div>
+      <div class="actions">
+        <span id="info-summary" class="muted"></span>
+        <button id="refresh" class="btn">刷新</button>
+      </div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="proc">进程</button>
+      <button class="tab" data-tab="ports">端口</button>
+      <button class="tab" data-tab="systemd">systemd</button>
+      <button class="tab" data-tab="pm2">pm2</button>
+      <button class="tab" data-tab="log">日志</button>
+    </div>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <!-- 进程 -->
+    <section id="view-proc">
+      <div class="toolbar">
+        <div class="seg" id="proc-seg">
+          <button class="seg-btn active" data-filter="user" title="用户态进程（非内核线程）">用户 <span data-cnt="user">0</span></button>
+          <button class="seg-btn" data-filter="sys" title="内核线程 [kworker] 等，通常无需管理">系统 <span data-cnt="sys">0</span></button>
+          <button class="seg-btn" data-filter="all" title="全部进程">全部 <span data-cnt="all">0</span></button>
+        </div>
+        <input id="proc-search" class="input grow" placeholder="搜索进程（命令 / 用户 / PID）…" />
+        <span class="muted" id="proc-count"></span>
+      </div>
+      <table class="ctab">
+        <thead>
+          <tr>
+            <th>PID</th>
+            <th>用户</th>
+            <th class="num sortable" data-sort="cpu">CPU%</th>
+            <th class="num sortable" data-sort="mem">内存%</th>
+            <th class="num">RSS</th>
+            <th>STAT</th>
+            <th>命令</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="proc-rows"><tr><td colspan="8" class="muted center">加载中…</td></tr></tbody>
+      </table>
+    </section>
+
+    <!-- 端口 -->
+    <section id="view-ports" class="hidden">
+      <div class="toolbar">
+        <input id="port-search" class="input grow" placeholder="搜索端口 / 进程 / 地址…" />
+        <span class="muted">监听中的 TCP/UDP 端口 → 进程</span>
+      </div>
+      <table class="ctab">
+        <thead>
+          <tr><th>协议</th><th>监听地址</th><th class="num">端口</th><th>进程</th><th></th></tr>
+        </thead>
+        <tbody id="port-rows"><tr><td colspan="5" class="muted center">—</td></tr></tbody>
+      </table>
+    </section>
+
+    <!-- systemd -->
+    <section id="view-systemd" class="hidden">
+      <div class="toolbar">
+        <input id="sd-search" class="input grow" placeholder="搜索服务…" />
+      </div>
+      <table class="ctab">
+        <thead>
+          <tr><th>服务</th><th>状态</th><th>描述</th><th></th></tr>
+        </thead>
+        <tbody id="sd-rows"><tr><td colspan="4" class="muted center">—</td></tr></tbody>
+      </table>
+    </section>
+
+    <!-- pm2 -->
+    <section id="view-pm2" class="hidden">
+      <div class="toolbar">
+        <span class="muted">pm2 进程（按 Agent 运行用户的 pm2 守护进程）</span>
+      </div>
+      <table class="ctab">
+        <thead>
+          <tr><th>名称</th><th>状态</th><th class="num">CPU</th><th class="num">内存</th><th class="num">重启</th><th></th></tr>
+        </thead>
+        <tbody id="pm2-rows"><tr><td colspan="6" class="muted center">—</td></tr></tbody>
+      </table>
+    </section>
+    <!-- 日志文件 -->
+    <section id="view-log" class="hidden">
+      <div class="toolbar">
+        <input id="log-path" class="input grow" placeholder="/var/log/nginx/error.log（绝对路径）" />
+        <select id="log-lines" class="input" style="width:auto;flex:none">
+          <option value="100">100 行</option>
+          <option value="200" selected>200 行</option>
+          <option value="500">500 行</option>
+        </select>
+        <button id="log-view" class="btn btn-primary btn-sm">查看</button>
+      </div>
+      <div class="toolbar" id="log-quick">
+        <span class="muted">常用：</span>
+        <button class="btn btn-sm" data-path="/var/log/syslog">syslog</button>
+        <button class="btn btn-sm" data-path="/var/log/messages">messages</button>
+        <button class="btn btn-sm" data-path="/var/log/nodeget-agent/app.log">nodeget-agent</button>
+        <button class="btn btn-sm" data-path="/var/log/nginx/error.log">nginx err</button>
+        <button class="btn btn-sm" data-path="/var/log/nginx/access.log">nginx acc</button>
+      </div>
+      <div id="log-err" class="banner hidden"></div>
+      <pre id="log-out" class="logbox">输入日志文件的绝对路径后点「查看」（或点上面的常用项）。</pre>
+    </section>
+
+  </div>
+
+  <!-- 状态 / 日志 -->
+  <div id="logmodal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span id="log-title"></span>
+        <button id="log-close" class="btn">关闭</button>
+      </div>
+      <pre id="log-body" class="logs"></pre>
+    </div>
+  </div>
+
+  <!-- 确认 -->
+  <div id="confirmmodal" class="modal hidden">
+    <div class="modal-box confirm-box">
+      <div class="modal-head"><span>确认操作</span></div>
+      <div id="confirm-msg" class="confirm-msg"></div>
+      <div class="confirm-actions">
+        <button id="confirm-cancel" class="btn">取消</button>
+        <button id="confirm-ok" class="btn btn-primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./assets/main.js"></script>
+</body>
+</html>

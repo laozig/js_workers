@@ -1,6 +1,6 @@
-# 消息通知 · notify
+# 消息通知 · `notify`
 
-节点**离线 / 上线 / 到期 / 流量超额**事件,通过 Telegram Bot 推送(对齐 Komari 通知)。配置 + 模板 + 测试都在内置 `/ui`。
+NodeGet 事件通知(对齐 Komari):节点**离线/上线、到期提醒、流量超额**,通过 Telegram Bot 推送。完全在边缘端运行,不改探针 agent。配置面板由 `notify-extension`(token 鉴权 iframe)经 `onCall` 读写——**无内置 `/ui`、无 `route_secret`**。
 
 ---
 
@@ -8,15 +8,16 @@
 
 | 键 | 必填 | 说明 |
 |---|---|---|
-| `token` | ✅ | NodeGet 平台 Token,需含「读 agent / KV」权限;cron 触发还需 `JsWorker::RunDefinedJsWorker`。⚠️ **不是** Telegram bot token(Telegram 的 bot_token 在 `/ui` 里填)。 |
-| `route_secret` | 可选 | 设了后 `/ui` 打开需登录密钥(本机 localStorage 记住);也可用 `…/ui#s=<密钥>` 免登录直达(hash 不进日志)。 |
+| `token` | ✅ | NodeGet 平台 Token,需含「读 agent / 动态摘要 + KV 读写」;cron 触发还需 `JsWorker::RunDefinedJsWorker`。⚠️ **不是** Telegram bot token。 |
+
+> Telegram 的 `bot_token` / `chat_id` 不在 env,在配置面板里填(存 KV);`bot_token` 经 `get_config` 返回时始终**打码**。
 
 ## 定时任务(必须)
 
 新建 JsWorker 定时任务 → 脚本 `notify-worker` → cron 建议 `0 */2 * * * *`(每 2 分钟,6 段格式)。
 > ⚠️ 没有定时任务则**不检测离线 / 上线 / 到期**(只有手动「立即检测」会跑)。
 
-## onCall / onInlineCall(`params.action`)
+## onCall / onInlineCall(`params.action`,供扩展经 `js-worker_run` 调用)
 
 | action | 参数 | 说明 |
 |---|---|---|
@@ -26,21 +27,25 @@
 | `run` | — | 立即检测并推送一轮 |
 | `get_state` | — | 读运行状态(`last_run` / `last_sent` 等) |
 
-## HTTP 路由(`/nodeget/worker-route/notify`)
+> 已移除内置 `/ui` 与 HTTP 路由(`onRoute`):配置改由 `notify-extension` 用 NodeGet Token 调上面的 `onCall`(`js-worker_run` → 轮询 `js-result_query`),与 Docker / 流量监控插件一致。
 
-| 方法 路径 | 鉴权 | 说明 |
+## 配置模型(全局 KV,key `notify_config`)
+
+| 字段 | 默认 | 说明 |
 |---|---|---|
-| `GET /ui` | 公开(出登录页) | 配置页 |
-| `GET /config` | 需登录 | 读配置(打码)+ 状态 |
-| `POST /config` | 需登录 | 保存配置 |
-| `POST /test` | 需登录 | 发测试消息 |
-| `POST /run` | 需登录 | 立即检测一轮 |
+| `enabled` | `false` | 总开关,关闭则 onCron 不发送 |
+| `bot_token` / `chat_id` | — | Telegram 凭证(chat_id 可填 @频道名) |
+| `message_thread_id` | — | 可选,超级群话题 |
+| `endpoint` | `https://api.telegram.org/bot` | 被墙可填反代 |
+| `template` | `{{emoji}} {{event}}…` | 消息模板 |
+| `events` | offline/online/expire 开,traffic 关 | 四类事件开关 |
+| `expire_days` | `7` | 到期提前提醒天数(1–90) |
 
 ## 事件说明
 
 - **离线 / 上线**:90 秒无上报判离线;同一轮多台离线/恢复**合并成一条**;发送失败下轮重试。
-- **到期**:`metadata_expire_time` 距今 ≤ N 天(可配,默认 7),**每天提醒一次**(跨天重发,续费即停)。
-- **流量超额**:经 `inlineCall` 读 `traffic-billing-worker` 的告警节点,**80% 起每 +5% 档位报一次**;需在 `/ui` 勾选该事件且已部署 traffic-billing。
+- **到期**:`metadata_expire_time` 距今 ≤ N 天(默认 7),**每天提醒一次**(跨天重发,续费即停)。
+- **流量超额**:经 `inlineCall` 读 `traffic-billing-worker` 的告警节点,**80% 起每 +5% 档位报一次**;需勾选该事件且已部署 traffic-billing。
 
 ## 消息模板变量
 

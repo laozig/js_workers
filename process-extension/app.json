@@ -1,0 +1,30 @@
+{
+  "name": "process-manager",
+  "version": "1.0",
+  "description": "进程管理器：通过 Execute 任务调用各 Agent 的 ps / kill / systemctl / pm2，远程管理系统进程、systemd 服务与 pm2 进程。",
+  "extension_version": 1,
+  "author": "laozig",
+  "repository": "",
+  "homepage": "",
+  "license": "MIT",
+  "icon": "assets/icon.svg",
+  "routes": [
+    {
+      "type": "node",
+      "name": "进程",
+      "icon": "assets/route-icon.svg",
+      "entry": "index.html"
+    }
+  ],
+  "limits": [
+    {
+      "permissions": [
+        { "task": { "create": "execute" } },
+        { "task": { "read": "execute" } }
+      ],
+      "scopes": [
+        { "global": null }
+      ]
+    }
+  ]
+}

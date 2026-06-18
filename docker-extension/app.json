@@ -1,0 +1,30 @@
+{
+  "name": "docker-manager",
+  "version": "0.1.0",
+  "description": "Docker 管理器：通过 Execute 任务调用各 Agent 本地 docker CLI 完整管理容器与镜像（列表/日志/启停重启/删除/拉取/运行）。",
+  "extension_version": 1,
+  "author": "laozig",
+  "repository": "",
+  "homepage": "",
+  "license": "MIT",
+  "icon": "assets/icon.svg",
+  "routes": [
+    {
+      "type": "node",
+      "name": "Docker",
+      "icon": "assets/route-icon.svg",
+      "entry": "index.html"
+    }
+  ],
+  "limits": [
+    {
+      "permissions": [
+        { "task": { "create": "execute" } },
+        { "task": { "read": "execute" } }
+      ],
+      "scopes": [
+        { "global": null }
+      ]
+    }
+  ]
+}
