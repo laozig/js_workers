@@ -9,14 +9,14 @@
  *         到期每天提醒一次 · 记录 last_run
  *
  * ── 事件 ─────────────────────────────────────────────────────────
- *   offline  节点离线(动态摘要超过 OFFLINE_MS 无上报;同轮多台合并一条)
+ *   offline  节点离线(动态摘要超过 OFFLINE_MS 无上报、且持续达 offline_delay 分钟;同轮多台合并一条)
  *   online   节点从离线恢复(同轮多台合并一条)
  *   expire   metadata_expire_time 距今 <= expire_days 天(每天提醒一次,跨天重发,续费即停)
  *   traffic  流量超配额(经 inlineCall 读 traffic-billing-worker;从 80% 起每 +5% 档报一次)
  *
  * ── 存储(global 命名空间) ───────────────────────────────────────
  *   notify_config : { enabled, channel, bot_token, chat_id, message_thread_id,
- *                     endpoint, template, events:{offline,online,expire,traffic}, expire_days }
+ *                     endpoint, template, events:{offline,online,expire,traffic}, expire_days, offline_delay }
  *   notify_state  : { offline:[uuid...], expire_dates:{uuid:"YYYY-MM-DD"...}, traffic:{uuid:level...},
  *                     last_run, last_sent, last_note }
  *
@@ -36,7 +36,8 @@ var CFG_KEY = "notify_config";
 var STATE_KEY = "notify_state";
 var NAME_KEY = "metadata_name";
 var EXPIRE_KEY = "metadata_expire_time";
-var OFFLINE_MS = 90000;            // 90s 无上报视为离线
+var OFFLINE_MS = 90000;            // 90s 无上报视为"当前掉线"(用于恢复判定)
+var DEFAULT_OFFLINE_DELAY = 5;     // 离线持续达到该分钟数才告警(默认 5min,宽限期内恢复不报)
 var TRAFFIC_WORKER = "traffic-billing-worker";
 
 var DEFAULT_CFG = {
@@ -49,6 +50,7 @@ var DEFAULT_CFG = {
   template: "{{emoji}} {{event}}\n服务器：{{client}}\n时间：{{time}}",
   events: { offline: true, online: true, expire: true, traffic: false },
   expire_days: 7,
+  offline_delay: DEFAULT_OFFLINE_DELAY,
 };
 
 var EMOJI = { offline: "🔴", online: "🟢", expire: "⏰", traffic: "📊", test: "✅" };
@@ -100,6 +102,8 @@ function normalizeCfg(raw) {
   const ev = raw.events && typeof raw.events === "object" ? raw.events : {};
   let ed = Number(raw.expire_days);
   if (!(ed >= 1 && ed <= 90)) ed = 7;
+  let od = Number(raw.offline_delay);
+  if (!(od >= 0 && od <= 1440)) od = DEFAULT_OFFLINE_DELAY; // 0=立即;上限 24h
   return {
     enabled: raw.enabled === true,
     channel: "telegram",
@@ -115,6 +119,7 @@ function normalizeCfg(raw) {
       traffic: ev.traffic === true,
     },
     expire_days: Math.trunc(ed),
+    offline_delay: Math.trunc(od),
   };
 }
 async function getCfg(token) {
@@ -227,15 +232,19 @@ async function runCheck(token, ctx) {
 
   // 1) 离线/上线 —— 同一轮多台合并成一条;仅在通知成功时才并入状态,失败者整批下轮重试
   //    st.offline 语义:已就「离线」成功通知过、且仍被视作离线的节点集合
+  //    宽限期:节点掉线(90s 无上报)后,需持续静默达 offline_delay 分钟才告警;
+  //            期间恢复上报则自然不报(靠 lastReport 时间戳判断,无需额外状态)
   const prevOffline = new Set(st.offline);
-  const nowOffline = uuids.filter((u) => now - (tsMap.get(u) || 0) > OFFLINE_MS);
+  const nowOffline = uuids.filter((u) => now - (tsMap.get(u) || 0) > OFFLINE_MS); // 90s:当前掉线(供恢复判定)
   const nowOfflineSet = new Set(nowOffline);
+  const alertMs = Math.max(OFFLINE_MS, (cfg.offline_delay || 0) * 60000);          // 达到该静默时长才告警
   const trackOff = cfg.events.offline || cfg.events.online;
   if (trackOff) {
     const nextOffline = [];
-    const offlineNew = []; // 本轮新离线、需要通知的
+    const offlineNew = []; // 本轮新离线、已过宽限期、需要通知的
     for (const u of nowOffline) {
       if (prevOffline.has(u)) { nextOffline.push(u); continue; }   // 之前已通知,保留
+      if (now - (tsMap.get(u) || 0) < alertMs) continue;           // 宽限期内:暂不报也不记,恢复则自然消失
       if (cfg.events.offline) offlineNew.push(u);
       else nextOffline.push(u);                                    // 离线通知没开,但记录状态供「恢复」判定
     }
