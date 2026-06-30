@@ -226,6 +226,8 @@ function fill(c) {
   c = c || {};
   $("enabled").checked = !!c.enabled;
   $("template").value = c.template || "";
+  $("renew_template").value = c.renew_template || "";
+  $("traffic_template").value = c.traffic_template || "";
   configureSecretInput("bot_token", c.bot_token_set, c.bot_token_hint, "123456:ABC-DEF...");
   targetRows = Array.isArray(c.targets) && c.targets.length
     ? c.targets.map((target) => normalizeTarget(target, c.events))
@@ -235,6 +237,7 @@ function fill(c) {
   $("endpoint").value = c.endpoint || "https://api.telegram.org/bot";
   configureSecretInput("webhook_admin_secret", c.webhook_admin_secret_set, c.webhook_admin_secret_hint, "可选，建议使用长随机字符");
   $("expire_days").value = c.expire_days || 7;
+  $("traffic_threshold").value = c.traffic_threshold || 80;
 }
 function collect() {
   const targets = collectTargets();
@@ -246,7 +249,10 @@ function collect() {
     webhook_admin_secret: $("webhook_admin_secret").value.trim(),
     endpoint: $("endpoint").value.trim(),
     template: $("template").value,
+    renew_template: $("renew_template").value,
+    traffic_template: $("traffic_template").value,
     expire_days: Number($("expire_days").value) || 7,
+    traffic_threshold: Number($("traffic_threshold").value) || 80,
   };
 }
 

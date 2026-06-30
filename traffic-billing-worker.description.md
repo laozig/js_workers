@@ -21,7 +21,7 @@
 | action | 参数 | 说明 |
 |---|---|---|
 | `list` | — | 所有节点(含未开启)的记账视图 |
-| `get_summary` | — | 汇总 + 告警节点 `alerting:[{uuid,name,percent,level}]`(80% 起每 5% 一档,供 notify) |
+| `get_summary` | `{alert_threshold?}` | 汇总 + 告警节点 `alerting:[{uuid,name,percent,level,used_gb,quota_gb,reset_day,...}]`(默认 80% 起每 5% 一档,可由 `alert_threshold` 调整,供 notify) |
 | `get_config` | `{uuid}` | 读单节点配置 |
 | `set_config` | `{uuid, enabled?, billing_day?, mode?, quota_gb?}` | 改配置(`mode`= `outbound`/`inbound`/`both`;`quota_gb` 留空=不限额) |
 | `audit_now` | — | 立即审计一轮 |
@@ -41,7 +41,7 @@
 
 ## 计费规则
 
-- 配额留空 = 只统计用量、不限额、不告警;填数字 → 80% / 每 +5% 档位告警(供 notify 阶梯报警)。
+- 配额留空 = 只统计用量、不限额、不告警;填数字 → 默认 80% / 每 +5% 档位告警。`get_summary({alert_threshold})` 可调整告警起始阈值,供 notify 阶梯报警。
 - 按**日历月**重置:每月「起算日」0 点(东八区)清零;短月(如 2 月)自动落月末。
 - 计费方向:出网(上传)/ 入网(下载)/ 双向;节点重启计数器归零自动容错。
-- 配额状态等数据可被 `notify-worker` 经 `inlineCall` 读取做「流量超额」通知。
+- 配额状态等数据可被 `notify-worker` 经 `inlineCall` 读取做「流量配额提醒」。`get_summary({alert_threshold})` 可指定提醒起始阈值(1–200,默认 80),返回的 `alerting[]` 从该阈值起每 5% 一档。`get_summary().alerting[]` 会额外返回 `billing_day`、`mode`、`used_bytes`、`used_gb`、`quota_gb`、`remaining_gb`、`reset_day`、`next_reset_time`、`current_period_start`、`last_update`,用于流量通知模板显示已用/总配额和重置日。

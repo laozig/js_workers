@@ -9,11 +9,23 @@
 - `notify-worker` 新增 `targets` 通知目标列表,每个目标可单独配置名称、Chat ID、话题 ID、离线、恢复、到期、流量和启用状态。
 - `notify-worker` 支持 Telegram `/chatid` 与 `/chat_id` 指令通过 webhook 实时回复当前会话 ID、类型和名称。
 - `notify-worker` 新增可选 Webhook 管理密钥 `webhook_admin_secret`,可在扩展面板或 env 配置,用于保护 webhook 注册、注销和查询管理路由。
+- `notify-worker` 离线/上线模板新增 `{{clients}}`、`{{node_count}}`、`{{status}}`、`{{last_seen}}`、`{{last_seen_list}}`、`{{offline_duration}}`、`{{offline_duration_list}}`、`{{offline_delay}}`、`{{tags}}`、`{{tag_count}}` 等变量。
+- `notify-worker` 到期通知新增到期/续费信息模板 `renew_template`,支持 `{{expire_time}}`、`{{days_left}}`、`{{days_left_text}}`、`{{price}}`、`{{price_unit}}`、`{{price_cycle}}`、`{{renewal_price}}`、`{{tags}}` 等变量。
+- `notify-worker` 新增流量配额提醒模板 `traffic_template`,流量事件不再只能复用通用消息模板。
+- 流量配额提醒模板新增 `{{traffic_used}}`、`{{traffic_quota}}`、`{{traffic_percent}}`、`{{traffic_level}}`、`{{traffic_reset_day}}`、`{{traffic_billing_day}}`、`{{traffic_remaining}}` 等变量,可显示已用流量、总配额、使用率、提醒档位和下次重置日。
+- `notify-worker` 新增流量提醒阈值 `traffic_threshold`,默认 80%,可配置 1–200,达到阈值后每 +5% 档位提醒。
 - `notify-extension` 的 Bot Token 与 Webhook 管理密钥输入框默认隐藏,支持眼睛按钮临时显示本次输入。
 - `notify-extension` 将原 Chat ID 文本框改为通知目标列表,支持新增、删除目标并逐行勾选接收事件。
+- `notify-extension` 配置页新增「到期/续费信息模板」和「流量配额提醒模板」输入框,可在 Dashboard 内直接编辑。
 
 ### Changed
 - `notify-worker` 发送事件时按目标的事件开关筛选接收方;旧 `chat_id` / `message_thread_id` / `events` 配置会在读取时自动兼容为目标列表。
+- 到期通知会读取 `metadata_price`、`metadata_price_unit`、`metadata_price_cycle`、`metadata_expire_time` 与 `metadata_tags`,并直接按 `renew_template` 渲染完整到期/续费消息。
+- 到期和流量模板的 `{{event}}` 改为动态文案:到期按剩余天数区分“即将到期/今日到期/已过期”,流量按使用率区分“配额提醒/接近配额/已达配额/已超配额”。
+- 续费增强字段改为可选读取:缺少标签/价格等可选字段权限时对应变量为空,不会阻断基础通知;Dashboard 写入的 `YYYY-MM-DD` 到期日期会按日期原样显示。
+- 离线成功通知后会在 `notify_state.offline_since` 记录节点离线前最后上报时间,用于恢复通知显示离线持续时间;旧状态无该字段时自动兼容。
+- `traffic-billing-worker` 升级为 `v3.1.0`,其 `get_summary().alerting[]` 保留原有 `uuid/name/percent/level/thresholds`,并额外返回用量、配额、计费日、重置日和更新时间,供通知模板渲染。
+- `traffic-billing-worker` 的 `get_summary` 支持 `alert_threshold` 参数,供通知 worker 按配置阈值生成流量提醒列表。
 
 ## [1.1.0] - 2026-06-18
 
@@ -35,7 +47,7 @@
 
 ### Added
 - `traffic-billing-worker.js` — 流量记账 Worker（逐节点 opt-in、配额阶梯告警、汇总接口）
-- `notify-worker.js` — 消息通知 Worker（离线/上线/到期/流量超额 → Telegram 推送）
+- `notify-worker.js` — 消息通知 Worker（离线/上线/到期/流量配额提醒 → Telegram 推送）
 - `traffic-monitor-extension.zip` — 流量监控 Dashboard 扩展
 - `notify-extension.zip` — 消息通知 Dashboard 扩展
 - 配套扩展源码（`extension/`、`notify-extension/`）

@@ -1,12 +1,12 @@
 /**
- * notify-worker v1.3
+ * notify-worker v1.2.0
  *
- * NodeGet 事件通知(对齐 Komari 通知功能):节点离线/上线、到期提醒、流量超限,
+ * NodeGet 事件通知(对齐 Komari 通知功能):节点离线/上线、到期提醒、流量配额提醒,
  * 通过 Telegram Bot 推送。配置由 notify-extension(token 鉴权 iframe)经 onCall 读写。
- *   当前:新增 targets 通知目标列表,每个目标可单独选择接收离线/恢复/到期/流量事件。
- *   v1.3:chat_id 支持逗号/换行分隔的多个目标;Telegram /chatid 改为 webhook 实时响应。
- *   v1.2:移除内置 /ui 与 route_secret —— 配置面板改由 notify-extension 用 NodeGet Token
- *         调 onCall(get_config/set_config/test/run)完成。
+ *   当前:在 v1.2.0 基础上新增 targets 通知目标列表、节点标签变量、
+ *        到期/续费信息模板与流量配额提醒模板。
+ *   v1.2.0:移除内置 /ui 与 route_secret;配置面板改由 notify-extension 用 NodeGet Token
+ *          调 onCall(get_config/set_config/test/run)完成;支持 Telegram /chatid 实时响应。
  *   v1.1:bot_token 打码回显 · 发送失败下轮重试 · 离线/恢复同轮合并一条 ·
  *         到期每天提醒一次 · 记录 last_run
  *
@@ -14,13 +14,14 @@
  *   offline  节点离线(动态摘要超过 OFFLINE_MS 无上报、且持续达 offline_delay 分钟;同轮多台合并一条)
  *   online   节点从离线恢复(同轮多台合并一条)
  *   expire   metadata_expire_time 距今 <= expire_days 天(每天提醒一次,跨天重发,续费即停)
- *   traffic  流量超配额(经 inlineCall 读 traffic-billing-worker;从 80% 起每 +5% 档报一次)
+ *   traffic  流量配额提醒(经 inlineCall 读 traffic-billing-worker;从 traffic_threshold 起每 +5% 档报一次)
  *
  * ── 存储(global 命名空间) ───────────────────────────────────────
  *   notify_config : { enabled, channel, bot_token, targets:[{name,chat_id,message_thread_id,events,enabled}],
- *                     webhook_admin_secret, endpoint, template, events:{offline,online,expire,traffic},
- *                     expire_days, offline_delay }
- *   notify_state  : { offline:[uuid...], expire_dates:{uuid:"YYYY-MM-DD"...}, traffic:{uuid:level...},
+ *                     webhook_admin_secret, endpoint, template, renew_template, traffic_template,
+ *                     events:{offline,online,expire,traffic}, expire_days, traffic_threshold, offline_delay }
+ *   notify_state  : { offline:[uuid...], offline_since:{uuid:last_seen_ms...},
+ *                     expire_dates:{uuid:"YYYY-MM-DD"...}, traffic:{uuid:level...},
  *                     telegram_webhook_secret, telegram_webhook_url, last_run, last_sent, last_note }
  *
  * ── 入口 ─────────────────────────────────────────────────────────
@@ -40,6 +41,10 @@ var NS = "global";
 var CFG_KEY = "notify_config";
 var STATE_KEY = "notify_state";
 var NAME_KEY = "metadata_name";
+var TAGS_KEY = "metadata_tags";
+var PRICE_KEY = "metadata_price";
+var PRICE_UNIT_KEY = "metadata_price_unit";
+var PRICE_CYCLE_KEY = "metadata_price_cycle";
 var EXPIRE_KEY = "metadata_expire_time";
 var OFFLINE_MS = 90000;            // 90s 无上报视为"当前掉线"(用于恢复判定)
 var DEFAULT_OFFLINE_DELAY = 5;     // 离线持续达到该分钟数才告警(默认 5min,宽限期内恢复不报)
@@ -55,14 +60,26 @@ var DEFAULT_CFG = {
   targets: [],
   webhook_admin_secret: "",
   endpoint: "https://api.telegram.org/bot",
-  template: "{{emoji}} {{event}}\n服务器：{{client}}\n时间：{{time}}",
+  template: "{{emoji}} {{event}}\n服务器：{{clients}}\n标签：{{tags}}\n节点数量：{{node_count}}\n状态：{{status}}\n上报时间：{{last_seen}}\n持续时间：{{offline_duration}}\n告警延迟：{{offline_delay}}\n时间：{{time}}",
+  renew_template: "{{emoji}} {{event}}\n服务器：{{client}}\n标签：{{tags}}\n到期时间：{{expire_time}}\n剩余时间：{{days_left_text}}\n续费信息：{{renewal_price}}\n时间：{{time}}",
+  traffic_template: "{{emoji}} {{event}}\n服务器：{{client}}\n标签：{{tags}}\n已用流量：{{traffic_used}}\n流量配额：{{traffic_quota}}\n使用率：{{traffic_percent}}\n提醒档位：{{traffic_level}}\n重置日：{{traffic_reset_day}}\n时间：{{time}}",
   events: { offline: true, online: true, expire: true, traffic: false },
   expire_days: 7,
+  traffic_threshold: 80,
   offline_delay: DEFAULT_OFFLINE_DELAY,
 };
+var LEGACY_TEMPLATE = "{{emoji}} {{event}}\n服务器：{{client}}\n时间：{{time}}";
+var LEGACY_TAG_TEMPLATE = "{{emoji}} {{event}}\n服务器：{{client}}\n标签：{{tags}}\n时间：{{time}}";
+var LEGACY_RENEW_TEMPLATE = "到期时间：{{expire_time}}\n剩余时间：{{days_left_text}}\n续费信息：{{renewal_price}}\n标签：{{tags}}";
+var LEGACY_RENEW_TEMPLATE_FIXED_TITLE = "{{emoji}} 到期提醒\n服务器：{{client}}\n到期时间：{{expire_time}}\n剩余时间：{{days_left_text}}\n续费信息：{{renewal_price}}\n标签：{{tags}}\n时间：{{time}}";
+var LEGACY_RENEW_TEMPLATE_TAG_BEFORE_TIME = "{{emoji}} {{event}}\n服务器：{{client}}\n到期时间：{{expire_time}}\n剩余时间：{{days_left_text}}\n续费信息：{{renewal_price}}\n标签：{{tags}}\n时间：{{time}}";
+var LEGACY_TRAFFIC_TEMPLATE = "{{emoji}} {{event}}\n服务器：{{client}}\n已用流量：{{traffic_used}}\n流量配额：{{traffic_quota}}\n使用率：{{traffic_percent}}\n重置日：{{traffic_reset_day}}\n标签：{{tags}}\n时间：{{time}}";
+var LEGACY_TRAFFIC_TEMPLATE_FIXED_TITLE = "{{emoji}} 流量超额提醒\n服务器：{{client}}\n已用流量：{{traffic_used}}\n流量配额：{{traffic_quota}}\n使用率：{{traffic_percent}}\n重置日：{{traffic_reset_day}}\n标签：{{tags}}\n时间：{{time}}";
+var LEGACY_TRAFFIC_TEMPLATE_TAG_BEFORE_TIME = "{{emoji}} {{event}}\n服务器：{{client}}\n已用流量：{{traffic_used}}\n流量配额：{{traffic_quota}}\n使用率：{{traffic_percent}}\n提醒档位：{{traffic_level}}\n重置日：{{traffic_reset_day}}\n标签：{{tags}}\n时间：{{time}}";
+var LEGACY_FULL_TEMPLATE_TAG_BEFORE_TIME = "{{emoji}} {{event}}\n服务器：{{clients}}\n节点数量：{{node_count}}\n状态：{{status}}\n上报时间：{{last_seen}}\n持续时间：{{offline_duration}}\n告警延迟：{{offline_delay}}\n标签：{{tags}}\n时间：{{time}}";
 
 var EMOJI = { offline: "🔴", online: "🟢", expire: "⏰", traffic: "📊", test: "✅" };
-var EVENT_TEXT = { offline: "节点离线", online: "节点恢复在线", expire: "即将到期", traffic: "流量超配额", test: "测试通知" };
+var EVENT_TEXT = { offline: "节点离线", online: "节点恢复在线", expire: "节点即将到期", traffic: "流量配额提醒", test: "测试通知" };
 
 // ─── 工具 ───────────────────────────────────────────────────────────
 
@@ -194,6 +211,29 @@ function nowCST() {
 function nowDateCST() {
   return new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10); // YYYY-MM-DD(东八区)
 }
+function formatCST(ms) {
+  ms = Number(ms);
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  return new Date(ms + 8 * 3600000).toISOString().replace("T", " ").slice(0, 19);
+}
+function durationText(ms) {
+  ms = Number(ms);
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const total = Math.floor(ms / 1000);
+  const d = Math.floor(total / 86400);
+  const h = Math.floor((total % 86400) / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (d > 0) return d + " 天 " + h + " 小时";
+  if (h > 0) return h + " 小时 " + m + " 分钟";
+  if (m > 0) return m + " 分钟 " + s + " 秒";
+  return s + " 秒";
+}
+function offlineDelayText(minutes) {
+  minutes = Number(minutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) return "立即";
+  return Math.trunc(minutes) + " 分钟";
+}
 // 解析到期时间:支持 ISO 日期串(如 "2026-06-19")、毫秒、秒 时间戳
 function parseExpireMs(raw) {
   if (raw == null || raw === "") return NaN;
@@ -210,6 +250,119 @@ function expireDaysLeft(raw) {
   const DAY = 86400000, off = 8 * 3600000;
   return Math.floor((exp + off) / DAY) - Math.floor((Date.now() + off) / DAY);
 }
+function isDateOnly(raw) {
+  return typeof raw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.trim());
+}
+function formatExpireTime(raw) {
+  if (isDateOnly(raw)) return raw.trim();
+  const exp = parseExpireMs(raw);
+  if (!Number.isFinite(exp)) return "";
+  return new Date(exp + 8 * 3600000).toISOString().replace("T", " ").slice(0, 19);
+}
+function scalarText(raw) {
+  if (raw == null) return "";
+  if (typeof raw === "number" && Number.isFinite(raw)) return String(raw);
+  if (typeof raw === "string") return raw.trim();
+  return "";
+}
+function normalizeTags(raw) {
+  let arr = [];
+  if (Array.isArray(raw)) {
+    arr = raw;
+  } else if (typeof raw === "string") {
+    const s = raw.trim();
+    if (s) {
+      try {
+        const parsed = JSON.parse(s);
+        arr = Array.isArray(parsed) ? parsed : s.split(/[,\n]+/);
+      } catch (e) {
+        arr = s.split(/[,\n]+/);
+      }
+    }
+  }
+  const out = [];
+  for (const item of arr) {
+    const tag = String(item || "").trim();
+    if (tag && out.indexOf(tag) < 0) out.push(tag);
+  }
+  return out;
+}
+function tagsText(raw) {
+  return normalizeTags(raw).join(", ");
+}
+function combineTags(values) {
+  const out = [];
+  for (const value of values || []) {
+    for (const tag of normalizeTags(value)) {
+      if (out.indexOf(tag) < 0) out.push(tag);
+    }
+  }
+  return out.join(", ");
+}
+function daysLeftText(days) {
+  if (days == null) return "";
+  return days >= 0 ? "剩 " + days + " 天" : "已过期 " + Math.abs(days) + " 天";
+}
+function expireEventText(days) {
+  if (days == null) return EVENT_TEXT.expire;
+  if (days < 0) return "节点已过期";
+  if (days === 0) return "节点今日到期";
+  return "节点即将到期";
+}
+function expireStatusText(days) {
+  if (days == null) return "";
+  if (days < 0) return "已过期";
+  if (days === 0) return "今日到期";
+  return "即将到期";
+}
+function renewalPriceText(price, unit, cycle) {
+  price = scalarText(price);
+  unit = scalarText(unit);
+  cycle = scalarText(cycle);
+  const prefixUnits = "$€£¥₽₣₹₫฿";
+  const amount = price ? (unit ? (prefixUnits.indexOf(unit) >= 0 ? unit + price : price + " " + unit) : price) : "";
+  if (amount && cycle) return amount + " / " + cycle + " 天";
+  if (amount) return amount;
+  if (cycle) return cycle + " 天/周期";
+  return "";
+}
+function trimNumberText(n) {
+  if (!Number.isFinite(n)) return "";
+  return String(Math.round(n * 100) / 100);
+}
+function trafficGbText(raw) {
+  if (raw == null || raw === "") return "";
+  const n = Number(raw);
+  return Number.isFinite(n) ? trimNumberText(n) + " GB" : "";
+}
+function trafficPercentText(raw, fallbackLevel) {
+  const value = raw == null || raw === "" ? fallbackLevel : raw;
+  if (value == null || value === "") return "";
+  const n = Number(value);
+  return Number.isFinite(n) ? trimNumberText(n) + "%" : "";
+}
+function trafficEventText(percent, fallbackLevel) {
+  const value = percent == null || percent === "" ? fallbackLevel : percent;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return EVENT_TEXT.traffic;
+  if (n > 100) return "流量已超配额";
+  if (n === 100) return "流量已达配额";
+  if (n >= 90) return "流量接近配额";
+  return "流量配额提醒";
+}
+function trafficStatusText(percent, fallbackLevel) {
+  const value = percent == null || percent === "" ? fallbackLevel : percent;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  if (n > 100) return "已超配额";
+  if (n === 100) return "已达配额";
+  if (n >= 90) return "接近配额";
+  return "提醒阈值";
+}
+function trafficBillingDayText(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 1 && n <= 31 ? "每月 " + Math.trunc(n) + " 日" : "";
+}
 
 // ─── 配置 / 状态 ────────────────────────────────────────────────────
 
@@ -218,9 +371,14 @@ function normalizeCfg(raw) {
   const ev = normalizeEventFlags(raw.events, DEFAULT_CFG.events);
   let ed = Number(raw.expire_days);
   if (!(ed >= 1 && ed <= 90)) ed = 7;
+  let tt = Number(raw.traffic_threshold);
+  if (!(tt >= 1 && tt <= 200)) tt = DEFAULT_CFG.traffic_threshold;
   let od = Number(raw.offline_delay);
   if (!(od >= 0 && od <= 1440)) od = DEFAULT_OFFLINE_DELAY; // 0=立即;上限 24h
   const targets = normalizeTargets(raw.targets, raw.chat_id, raw.message_thread_id, ev);
+  const template = String(raw.template || DEFAULT_CFG.template);
+  const renewTemplate = String(raw.renew_template || DEFAULT_CFG.renew_template);
+  const trafficTemplate = String(raw.traffic_template || DEFAULT_CFG.traffic_template);
   return {
     enabled: raw.enabled === true,
     channel: "telegram",
@@ -230,9 +388,12 @@ function normalizeCfg(raw) {
     targets,
     webhook_admin_secret: String(raw.webhook_admin_secret || ""),
     endpoint: String(raw.endpoint || DEFAULT_CFG.endpoint),
-    template: String(raw.template || DEFAULT_CFG.template),
+    template: (template === LEGACY_TEMPLATE || template === LEGACY_TAG_TEMPLATE || template === LEGACY_FULL_TEMPLATE_TAG_BEFORE_TIME) ? DEFAULT_CFG.template : template,
+    renew_template: (renewTemplate === LEGACY_RENEW_TEMPLATE || renewTemplate === LEGACY_RENEW_TEMPLATE_FIXED_TITLE || renewTemplate === LEGACY_RENEW_TEMPLATE_TAG_BEFORE_TIME) ? DEFAULT_CFG.renew_template : renewTemplate,
+    traffic_template: (trafficTemplate === LEGACY_TRAFFIC_TEMPLATE || trafficTemplate === LEGACY_TRAFFIC_TEMPLATE_FIXED_TITLE || trafficTemplate === LEGACY_TRAFFIC_TEMPLATE_TAG_BEFORE_TIME) ? DEFAULT_CFG.traffic_template : trafficTemplate,
     events: ev,
     expire_days: Math.trunc(ed),
+    traffic_threshold: Math.trunc(tt),
     offline_delay: Math.trunc(od),
   };
 }
@@ -247,9 +408,11 @@ async function getState(token) {
   const v = await rpc("kv_get_value", { token, namespace: NS, key: STATE_KEY });
   return {
     offline: Array.isArray(v && v.offline) ? v.offline : [],
+    offline_since: (v && v.offline_since && typeof v.offline_since === "object" && !Array.isArray(v.offline_since)) ? v.offline_since : {}, // uuid→离线前最后上报时间(ms),用于恢复时计算持续时间
     expired: Array.isArray(v && v.expired) ? v.expired : [],
     expire_dates: (v && v.expire_dates && typeof v.expire_dates === "object") ? v.expire_dates : {}, // uuid→上次提醒日期(CST),用于每天提醒
     traffic: (v && v.traffic && typeof v.traffic === "object" && !Array.isArray(v.traffic)) ? v.traffic : {}, // uuid→已报最高档位(%),阶梯报警
+    traffic_threshold: (v && Number(v.traffic_threshold)) || 0, // 上次运行使用的流量提醒起始阈值,变更后清阶梯状态
     telegram_webhook_secret: String((v && v.telegram_webhook_secret) || ""), // Telegram webhook secret_token,用于校验来源
     telegram_webhook_url: String((v && v.telegram_webhook_url) || ""),       // 当前注册的 webhook URL,便于排查
     last_run: (v && Number(v.last_run)) || 0,   // 上次 onCron/检测时间(ms),0=从未运行
@@ -264,9 +427,25 @@ async function setState(token, st) {
 // ─── Telegram 发送 + 模板 ───────────────────────────────────────────
 
 function render(tpl, ctx) {
-  return String(tpl).replace(/\{\{(\w+)\}\}/g, function (_, k) {
-    return ctx[k] != null ? String(ctx[k]) : "";
-  });
+  return String(tpl)
+    .split(/\r?\n/)
+    .filter((line) => {
+      if (line.indexOf("{{tags}}") < 0) return true;
+      return ctx.tags != null && String(ctx.tags).trim() !== "";
+    })
+    .map((line) => line.replace(/\{\{(\w+)\}\}/g, function (_, k) {
+      return ctx[k] != null ? String(ctx[k]) : "";
+    }))
+    .join("\n");
+}
+function templateUses(tpl, names) {
+  tpl = String(tpl || "");
+  return (names || []).some((name) => tpl.indexOf("{{" + name + "}}") >= 0);
+}
+function templateForEvent(cfg, type) {
+  if (type === "expire") return String(cfg.renew_template || DEFAULT_CFG.renew_template);
+  if (type === "traffic") return String(cfg.traffic_template || DEFAULT_CFG.traffic_template);
+  return String(cfg.template || DEFAULT_CFG.template);
 }
 async function sendTelegram(cfg, text) {
   const targets = enabledTargets(cfg);
@@ -300,11 +479,44 @@ async function sendTelegramToTargets(cfg, targets, text, options) {
 async function sendTelegramToChat(cfg, chatId, text, options) {
   return await sendTelegramToTargets(cfg, [{ chat_id: String(chatId), message_thread_id: "" }], text, options);
 }
-function notify(cfg, type, client, extra) {
-  const text = render(cfg.template, {
-    emoji: EMOJI[type] || "", event: (EVENT_TEXT[type] || type) + (extra ? " " + extra : ""),
-    client: client || "", time: nowCST(), type,
-  });
+function notifyWithContext(cfg, type, client, extra, extraCtx) {
+  const ctx = {
+    emoji: EMOJI[type] || "",
+    event: (EVENT_TEXT[type] || type) + (extra ? " " + extra : ""),
+    client: client || "",
+    clients: client || "",
+    time: nowCST(),
+    type,
+    status: "",
+    node_count: "",
+    last_seen: "",
+    last_seen_list: "",
+    offline_duration: "",
+    offline_duration_list: "",
+    offline_delay: "",
+    tags: "",
+    tag_count: "",
+    expire_time: "",
+    days_left: "",
+    days_left_text: "",
+    price: "",
+    price_unit: "",
+    price_cycle: "",
+    renewal_price: "",
+    renewal: "",
+    traffic_used: "",
+    traffic_quota: "",
+    traffic_percent: "",
+    traffic_level: "",
+    traffic_reset_day: "",
+    traffic_billing_day: "",
+    traffic_used_gb: "",
+    traffic_quota_gb: "",
+    traffic_remaining: "",
+    traffic_remaining_gb: "",
+    ...(extraCtx || {}),
+  };
+  const text = render(templateForEvent(cfg, type), ctx).replace(/\n{3,}/g, "\n\n").trim();
   return sendTelegramForEvent(cfg, type, text);
 }
 // 聚合:同一轮多台离线/恢复合并成一条消息(单台时与原来一致)
@@ -312,9 +524,9 @@ function groupClient(names) {
   const n = names.length;
   return n <= 6 ? names.join("、") : names.slice(0, 6).join("、") + " 等 " + n + " 台";
 }
-function notifyGroup(cfg, type, names) {
+function notifyGroup(cfg, type, names, extraCtx) {
   const n = names.length;
-  return notify(cfg, type, groupClient(names), n > 1 ? "（共 " + n + " 台）" : "");
+  return notifyWithContext(cfg, type, groupClient(names), n > 1 ? "（共 " + n + " 台）" : "", extraCtx || {});
 }
 
 // ─── Telegram /chatid 指令 ─────────────────────────────────────────
@@ -354,12 +566,41 @@ async function listUuids(token) {
   const u = await rpc("agent-uuid_list_all", { token });
   return Array.isArray(u) ? u : [];
 }
-async function getMulti(token, uuids, key) {
-  if (!uuids.length) return new Map();
-  const rows = await rpc("kv_get_multi_value", { token, namespace_key: uuids.map((u) => ({ namespace: u, key })) });
-  const m = new Map();
-  for (const r of rows || []) m.set(r.namespace, r.value);
-  return m;
+function emptyMetadataMaps(keys) {
+  const maps = {};
+  for (const key of keys || []) maps[key] = new Map();
+  return maps;
+}
+async function getMetadataMaps(token, uuids, keys, optional) {
+  keys = (keys || []).filter(Boolean);
+  if (!uuids.length || !keys.length) return emptyMetadataMaps(keys);
+  const namespaceKey = [];
+  for (const u of uuids) {
+    for (const key of keys) namespaceKey.push({ namespace: u, key });
+  }
+  try {
+    const rows = await rpc("kv_get_multi_value", { token, namespace_key: namespaceKey });
+    const maps = emptyMetadataMaps(keys);
+    for (const r of rows || []) {
+      if (!maps[r.key]) maps[r.key] = new Map();
+      maps[r.key].set(r.namespace, r.value);
+    }
+    return maps;
+  } catch (e) {
+    if (optional) {
+      const maps = emptyMetadataMaps(keys);
+      for (const key of keys) {
+        try {
+          const partial = await getMetadataMaps(token, uuids, [key], false);
+          maps[key] = partial[key] || new Map();
+        } catch (inner) {
+          maps[key] = new Map();
+        }
+      }
+      return maps;
+    }
+    throw e;
+  }
 }
 async function getTimestamps(token, uuids) {
   if (!uuids.length) return new Map();
@@ -382,14 +623,115 @@ async function runCheck(token, ctx) {
   const uuids = await listUuids(token);
   if (!uuids.length) { st.last_sent = 0; st.last_note = "无节点"; await setState(token, st); return { ok: true, sent: 0, note: "无节点" }; }
 
-  const [tsMap, nameMap, expireMap] = await Promise.all([
+  const needsExpire = hasTargetsForEvent(cfg, "expire");
+  const needsTraffic = hasTargetsForEvent(cfg, "traffic");
+  const requiredKeys = needsExpire ? [NAME_KEY, EXPIRE_KEY] : [NAME_KEY];
+  const optionalKeys = [];
+  const templateText = String(cfg.template || "")
+    + (needsExpire ? "\n" + String(cfg.renew_template || "") : "")
+    + (needsTraffic ? "\n" + String(cfg.traffic_template || "") : "");
+  if (templateUses(templateText, ["tags", "tag_count"])) optionalKeys.push(TAGS_KEY);
+  if (needsExpire && templateUses(cfg.renew_template, ["price", "price_unit", "price_cycle", "renewal_price"])) {
+    optionalKeys.push(PRICE_KEY, PRICE_UNIT_KEY, PRICE_CYCLE_KEY);
+  }
+  const [tsMap, requiredMeta, optionalMeta] = await Promise.all([
     getTimestamps(token, uuids),
-    getMulti(token, uuids, NAME_KEY),
-    getMulti(token, uuids, EXPIRE_KEY),
+    getMetadataMaps(token, uuids, requiredKeys, false),
+    getMetadataMaps(token, uuids, optionalKeys, true),
   ]);
+  const nameMap = requiredMeta[NAME_KEY] || new Map();
+  const expireMap = requiredMeta[EXPIRE_KEY] || new Map();
+  const tagsMap = optionalMeta[TAGS_KEY] || new Map();
+  const priceMap = optionalMeta[PRICE_KEY] || new Map();
+  const priceUnitMap = optionalMeta[PRICE_UNIT_KEY] || new Map();
+  const priceCycleMap = optionalMeta[PRICE_CYCLE_KEY] || new Map();
   const nameOf = (u) => {
     const n = nameMap.get(u);
     return (typeof n === "string" && n) ? n : u.slice(0, 8);
+  };
+  const tagsOf = (u) => tagsText(tagsMap.get(u));
+  const groupCtxOf = (nodes) => {
+    const tags = combineTags(nodes.map((u) => tagsMap.get(u)));
+    return { tags, tag_count: tags ? String(tags.split(", ").filter(Boolean).length) : "" };
+  };
+  const expireCtxOf = (u, days) => {
+    const tags = tagsOf(u);
+    const price = scalarText(priceMap.get(u));
+    const priceUnit = scalarText(priceUnitMap.get(u));
+    const priceCycle = scalarText(priceCycleMap.get(u));
+    const ctx = {
+      event: expireEventText(days),
+      status: expireStatusText(days),
+      tags,
+      tag_count: tags ? String(tags.split(", ").filter(Boolean).length) : "",
+      expire_time: formatExpireTime(expireMap.get(u)),
+      days_left: days == null ? "" : String(days),
+      days_left_text: daysLeftText(days),
+      price,
+      price_unit: priceUnit,
+      price_cycle: priceCycle,
+      renewal_price: renewalPriceText(price, priceUnit, priceCycle),
+    };
+    return ctx;
+  };
+  const nodeCtxOf = (u) => {
+    const tags = tagsOf(u);
+    return { tags, tag_count: tags ? String(tags.split(", ").filter(Boolean).length) : "" };
+  };
+  const offlineEventCtxOf = (type, nodes, offlineSinceMap) => {
+    const names = nodes.map(nameOf);
+    const lines = [];
+    const durationLines = [];
+    let firstSeen = 0;
+    let maxDuration = 0;
+    for (const u of nodes) {
+      const seen = type === "online"
+        ? Number(offlineSinceMap && offlineSinceMap[u])
+        : Number(tsMap.get(u) || 0);
+      if (seen > 0) {
+        if (!firstSeen || seen < firstSeen) firstSeen = seen;
+        lines.push(nameOf(u) + ": " + formatCST(seen));
+        const dur = now - seen;
+        if (dur > maxDuration) maxDuration = dur;
+        durationLines.push(nameOf(u) + ": " + durationText(dur));
+      }
+    }
+    const tags = combineTags(nodes.map((u) => tagsMap.get(u)));
+    return {
+      client: groupClient(names),
+      clients: names.join("、"),
+      node_count: String(nodes.length),
+      status: type === "online" ? "已恢复在线" : "离线",
+      last_seen: nodes.length === 1 ? (lines[0] || "") : (firstSeen ? formatCST(firstSeen) : ""),
+      last_seen_list: lines.join("\n"),
+      offline_duration: maxDuration ? durationText(maxDuration) : "",
+      offline_duration_list: durationLines.join("\n"),
+      offline_delay: offlineDelayText(cfg.offline_delay),
+      tags,
+      tag_count: tags ? String(tags.split(", ").filter(Boolean).length) : "",
+    };
+  };
+  const trafficCtxOf = (a) => {
+    const base = nodeCtxOf(a.uuid);
+    const level = a.level != null ? a.level : 80;
+    const usedGb = scalarText(a.used_gb);
+    const quotaGb = scalarText(a.quota_gb);
+    const remainingGb = scalarText(a.remaining_gb);
+    return {
+      ...base,
+      event: trafficEventText(a.percent, level),
+      status: trafficStatusText(a.percent, level),
+      traffic_used: trafficGbText(a.used_gb),
+      traffic_quota: trafficGbText(a.quota_gb),
+      traffic_percent: trafficPercentText(a.percent, level),
+      traffic_level: trafficPercentText(level, ""),
+      traffic_reset_day: scalarText(a.reset_day) || trafficBillingDayText(a.billing_day),
+      traffic_billing_day: trafficBillingDayText(a.billing_day),
+      traffic_used_gb: usedGb,
+      traffic_quota_gb: quotaGb,
+      traffic_remaining: trafficGbText(a.remaining_gb),
+      traffic_remaining_gb: remainingGb,
+    };
   };
 
   const now = Date.now();
@@ -400,6 +742,7 @@ async function runCheck(token, ctx) {
   //    宽限期:节点掉线(90s 无上报)后,需持续静默达 offline_delay 分钟才告警;
   //            期间恢复上报则自然不报(靠 lastReport 时间戳判断,无需额外状态)
   const prevOffline = new Set(st.offline);
+  const prevOfflineSince = (st.offline_since && typeof st.offline_since === "object") ? st.offline_since : {};
   const nowOffline = uuids.filter((u) => now - (tsMap.get(u) || 0) > OFFLINE_MS); // 90s:当前掉线(供恢复判定)
   const nowOfflineSet = new Set(nowOffline);
   const alertMs = Math.max(OFFLINE_MS, (cfg.offline_delay || 0) * 60000);          // 达到该静默时长才告警
@@ -408,16 +751,30 @@ async function runCheck(token, ctx) {
   const trackOff = sendOffline || sendOnline;
   if (trackOff) {
     const nextOffline = [];
+    const nextOfflineSince = {};
     const offlineNew = []; // 本轮新离线、已过宽限期、需要通知的
     for (const u of nowOffline) {
-      if (prevOffline.has(u)) { nextOffline.push(u); continue; }   // 之前已通知,保留
+      if (prevOffline.has(u)) {
+        nextOffline.push(u);
+        nextOfflineSince[u] = Number(prevOfflineSince[u]) || Number(tsMap.get(u) || 0) || now;
+        continue;
+      }                                                            // 之前已通知,保留
       if (now - (tsMap.get(u) || 0) < alertMs) continue;           // 宽限期内:暂不报也不记,恢复则自然消失
       if (sendOffline) offlineNew.push(u);
-      else nextOffline.push(u);                                    // 离线通知没开,但记录状态供「恢复」判定
+      else {
+        nextOffline.push(u);                                       // 离线通知没开,但记录状态供「恢复」判定
+        nextOfflineSince[u] = Number(tsMap.get(u) || 0) || now;
+      }
     }
     if (offlineNew.length) {
-      const r = await notifyGroup(cfg, "offline", offlineNew.map(nameOf));
-      if (r.ok) { offlineNew.forEach((u) => nextOffline.push(u)); sent.push("offline×" + offlineNew.length); }
+      const r = await notifyGroup(cfg, "offline", offlineNew.map(nameOf), offlineEventCtxOf("offline", offlineNew, prevOfflineSince));
+      if (r.ok) {
+        offlineNew.forEach((u) => {
+          nextOffline.push(u);
+          nextOfflineSince[u] = Number(tsMap.get(u) || 0) || now;
+        });
+        sent.push("offline×" + offlineNew.length);
+      }
       // 失败:整批不记,下轮仍是「新离线」会重发
     }
     // 恢复在线:之前离线、现在在线、且仍在节点列表 → 合并成一条
@@ -429,11 +786,17 @@ async function runCheck(token, ctx) {
       // online 没开:正常移除(不 push)
     }
     if (recovered.length) {
-      const r = await notifyGroup(cfg, "online", recovered.map(nameOf));
+      const r = await notifyGroup(cfg, "online", recovered.map(nameOf), offlineEventCtxOf("online", recovered, prevOfflineSince));
       if (r.ok) { sent.push("online×" + recovered.length); }       // 成功→正常移除
-      else { recovered.forEach((u) => nextOffline.push(u)); }      // 失败→保留离线态,下轮重发恢复
+      else {
+        recovered.forEach((u) => {
+          nextOffline.push(u);
+          nextOfflineSince[u] = Number(prevOfflineSince[u]) || now;
+        });
+      }                                                            // 失败→保留离线态,下轮重发恢复
     }
     st.offline = nextOffline;
+    st.offline_since = nextOfflineSince;
   }
 
   // 2) 到期提醒(每天提醒一次:同一东八区日期内只发一次,跨天重发;续费出窗后清除;发送失败当天重试)
@@ -446,7 +809,7 @@ async function runCheck(token, ctx) {
       if (days == null) continue;
       if (days > cfg.expire_days) continue;                       // 不在窗口→不保留(含续费,出窗后再进窗可重发)
       if (prevDates[u] === today) { nextDates[u] = today; continue; } // 今天已发,跳过
-      const r = await notify(cfg, "expire", nameOf(u), days >= 0 ? "剩 " + days + " 天" : "已过期");
+      const r = await notifyWithContext(cfg, "expire", nameOf(u), "", expireCtxOf(u, days));
       if (r.ok) { nextDates[u] = today; sent.push("expire:" + nameOf(u)); } // 成功→记今天
       // 失败:不记今天,同一天下轮会重试
     }
@@ -454,25 +817,26 @@ async function runCheck(token, ctx) {
     st.expired = Object.keys(nextDates); // 兼容旧字段
   }
 
-  // 3) 流量超配额(读 traffic-billing-worker;从 80% 起每升 5% 档位报一次;失败下轮重试)
+  // 3) 流量配额提醒(读 traffic-billing-worker;从配置阈值起每升 5% 档位报一次;失败下轮重试)
   if (hasTargetsForEvent(cfg, "traffic") && ctx && ctx.inlineCall) {
     try {
-      const prevLevels = st.traffic || {};
-      const sum = await ctx.inlineCall(TRAFFIC_WORKER, { action: "get_summary" }, 20);
+      const prevLevels = Number(st.traffic_threshold) === Number(cfg.traffic_threshold) ? (st.traffic || {}) : {};
+      const sum = await ctx.inlineCall(TRAFFIC_WORKER, { action: "get_summary", alert_threshold: cfg.traffic_threshold }, 20);
       const alerting = (sum && sum.alerting) || [];
       const nextLevels = {};
       for (const a of alerting) {
         const lvl = a.level != null ? a.level : 80;     // 当前档位(80/85/90…)
         const prev = prevLevels[a.uuid] || 0;           // 已报到的最高档
         if (lvl > prev) {
-          const r = await notify(cfg, "traffic", a.name || a.uuid.slice(0, 8), (a.percent != null ? a.percent + "%" : lvl + "%"));
+          const r = await notifyWithContext(cfg, "traffic", a.name || nameOf(a.uuid), "", trafficCtxOf(a));
           if (r.ok) { nextLevels[a.uuid] = lvl; sent.push("traffic:" + (a.name || a.uuid.slice(0, 8)) + "@" + lvl + "%"); } // 升档→报并记新档
           else { nextLevels[a.uuid] = prev; }           // 失败→保留旧档,下轮重试
         } else {
           nextLevels[a.uuid] = prev;                    // 未升档→保留水位(小幅波动不重复报)
         }
       }
-      st.traffic = nextLevels;                           // 不在 alerting(降回 80% 以下/重置)的节点自动清除,下次重新从 80% 报
+      st.traffic = nextLevels;                           // 不在 alerting(降回阈值以下/重置)的节点自动清除,下次重新从阈值报
+      st.traffic_threshold = cfg.traffic_threshold;
     } catch (e) { /* traffic-billing 未装或调用失败,忽略,保留旧 traffic 状态 */ }
   }
 

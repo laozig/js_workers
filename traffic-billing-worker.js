@@ -1,8 +1,11 @@
 /**
- * traffic-billing-worker v3.0
+ * traffic-billing-worker v3.1.0
  *
- * 逐台 opt-in 的节点流量记账 + 可选配额告警 + 对外汇总接口 + 内置配置 UI。
+ * 逐台 opt-in 的节点流量记账 + 可选配额告警 + 对外汇总接口。
  * 完全在 NodeGet 边缘端运行，不改探针任何代码。
+ *
+ *   v3.1.0:get_summary().alerting[] 增加用量、配额、重置日等字段;
+ *          get_summary 支持 alert_threshold 参数,供 notify 流量模板使用。
  *
  * ── 与 v2 的关键区别 ──────────────────────────────────────────────
  *   · 没有默认配额。每台机器单独开启、单独配置。
@@ -26,7 +29,7 @@
  * ── 入口 ─────────────────────────────────────────────────────────
  *   onCron       → 审计所有 enabled 机器
  *   onCall/onInlineCall → action: list / get_summary / get_config / set_config / audit_now
- *   onRoute      → GET /ui(配置页) /list /summary /config?uuid=  POST /config /audit
+ *   onRoute      → GET /list /summary /config?uuid=  POST /config /audit /reset
  *
  * env: {
  *   "token":        "<拥有相应权限的 NodeGet Token(读 agent/动态摘要 + KV 读写)>",
@@ -91,6 +94,18 @@ function periodStartFor(nowMs, billingDay) {
   const bd = Math.min(billingDay, daysInMonth);
   return Date.UTC(y, m, bd, 0, 0, 0, 0) - CST_OFFSET;
 }
+function nextPeriodStartFor(nowMs, billingDay) {
+  const start = periodStartFor(nowMs, billingDay);
+  const d = new Date(start + CST_OFFSET);
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + 1;
+  const daysInMonth = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  const bd = Math.min(billingDay, daysInMonth);
+  return Date.UTC(y, m, bd, 0, 0, 0, 0) - CST_OFFSET;
+}
+function formatDateCST(ms) {
+  return new Date(ms + CST_OFFSET).toISOString().slice(0, 10);
+}
 
 // ─── 配置 ───────────────────────────────────────────────────────────
 
@@ -103,6 +118,11 @@ function normalizeConfig(raw) {
   let q = Number(raw.quota_gb);
   const quota_gb = Number.isFinite(q) && q > 0 ? q : null; // null = 不限额
   return { enabled: raw.enabled === true, billing_day: bd, mode, quota_gb };
+}
+function normalizeAlertThreshold(raw) {
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 1 && n <= 200) return Math.trunc(n);
+  return 80;
 }
 
 // ─── 运行状态(snapshot) ───────────────────────────────────────────
@@ -213,10 +233,12 @@ function auditSnapshot(snap, config, sample, nowMs) {
 
 // ─── 视图 ───────────────────────────────────────────────────────────
 
-function nodeView(uuid, name, config, snap) {
+function nodeView(uuid, name, config, snap, nowMs) {
+  nowMs = nowMs || Date.now();
   const used = snap ? snap.accumulated_bytes || 0 : 0;
   const quotaBytes = config.quota_gb ? config.quota_gb * GiB : null;
   const percent = quotaBytes ? Math.round((used / quotaBytes) * 10000) / 100 : null;
+  const nextReset = nextPeriodStartFor(nowMs, config.billing_day);
   const alerts = snap ? snap.alerts_triggered || {} : {};
   return {
     uuid,
@@ -231,6 +253,8 @@ function nodeView(uuid, name, config, snap) {
     remaining_gb: quotaBytes ? bytesToGB(Math.max(0, quotaBytes - used)) : null,
     alerts_triggered: alerts,
     current_period_start: snap ? snap.current_period_start : null,
+    next_reset_time: nextReset,
+    reset_day: formatDateCST(nextReset),
     last_update: snap ? snap.last_update : null,
   };
 }
@@ -266,7 +290,7 @@ async function auditAll(token) {
       const updated = auditSnapshot(snap, config, sample, nowMs);
       if (!updated) { results.push({ uuid, skipped: "invalid sample" }); continue; }
       await setValue(token, uuid, LEDGER_KEY, { snapshot: updated });
-      results.push(nodeView(uuid, null, config, updated));
+      results.push(nodeView(uuid, null, config, updated, nowMs));
     } catch (e) {
       results.push({ uuid, error: String(e && e.message ? e.message : e) });
     }
@@ -289,13 +313,14 @@ async function listAll(token) {
     const rawLedger = ledgerMap.get(uuid);
     const snap = rawLedger && rawLedger.snapshot ? rawLedger.snapshot : null;
     const name = nameMap.get(uuid);
-    return nodeView(uuid, typeof name === "string" ? name : null, config, snap);
+    return nodeView(uuid, typeof name === "string" ? name : null, config, snap, nowMs);
   });
   nodes.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return { ok: true, count: nodes.length, nodes };
 }
 
-async function getSummary(token) {
+async function getSummary(token, params) {
+  const alertThreshold = normalizeAlertThreshold(params && params.alert_threshold);
   const { nodes } = await listAll(token);
   const enabled = nodes.filter((n) => n.enabled);
   let used = 0, quota = 0;
@@ -303,11 +328,27 @@ async function getSummary(token) {
   for (const n of enabled) {
     used += n.used_bytes;
     if (n.quota_gb) quota += n.quota_gb * GiB;
-    // 从 80% 起每 5% 一个档位(80/85/90/95/100/105…),供 notify 做阶梯报警
-    if (n.percent != null && n.percent >= 80) {
-      const level = Math.floor((n.percent - 80) / 5) * 5 + 80;
+    // 从指定阈值起每 5% 一个档位(如 80/85/90/95/100/105…),供 notify 做阶梯报警
+    if (n.percent != null && n.percent >= alertThreshold) {
+      const level = Math.floor((n.percent - alertThreshold) / 5) * 5 + alertThreshold;
       const hit = Object.keys(n.alerts_triggered || {}).filter((k) => n.alerts_triggered[k]);
-      alerting.push({ uuid: n.uuid, name: n.name, percent: n.percent, level, thresholds: hit });
+      alerting.push({
+        uuid: n.uuid,
+        name: n.name,
+        percent: n.percent,
+        level,
+        thresholds: hit,
+        billing_day: n.billing_day,
+        mode: n.mode,
+        quota_gb: n.quota_gb,
+        used_bytes: n.used_bytes,
+        used_gb: n.used_gb,
+        remaining_gb: n.remaining_gb,
+        reset_day: n.reset_day,
+        next_reset_time: n.next_reset_time,
+        current_period_start: n.current_period_start,
+        last_update: n.last_update,
+      });
     }
   }
   return {
@@ -317,6 +358,7 @@ async function getSummary(token) {
     total_count: nodes.length,
     total_used_gb: bytesToGB(used),
     total_quota_gb: quota ? bytesToGB(quota) : null,
+    alert_threshold: alertThreshold,
     alerting,
     nodes: enabled,
   };
@@ -378,7 +420,7 @@ async function dispatch(token, params) {
   const action = (params && params.action) || "get_summary";
   switch (action) {
     case "list": return await listAll(token);
-    case "get_summary": return await getSummary(token);
+    case "get_summary": return await getSummary(token, params);
     case "get_config": return await getConfig(token, params.uuid);
     case "set_config": return await setConfig(token, params);
     case "audit_now": return await auditAll(token);
@@ -432,7 +474,7 @@ export default {
       const isPublic = method === "GET" && (path.endsWith("/list") || path.endsWith("/summary"));
       if (!isPublic && !authed(request, env)) return json({ ok: false, error: "unauthorized" }, 401);
       if (method === "GET" && path.endsWith("/list")) return json(await listAll(token));
-      if (method === "GET" && path.endsWith("/summary")) return json(await getSummary(token));
+      if (method === "GET" && path.endsWith("/summary")) return json(await getSummary(token, { alert_threshold: url.searchParams.get("alert_threshold") }));
       if (method === "GET" && path.endsWith("/config")) {
         return json(await getConfig(token, url.searchParams.get("uuid")));
       }
