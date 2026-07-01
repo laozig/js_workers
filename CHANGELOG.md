@@ -2,6 +2,11 @@
 
 本文件记录 `js_workers` 仓库的主要变更。
 
+## [1.2.1] - 2026-07-01
+
+### Added
+- `notify-worker` 注册 Telegram webhook 时同步调用 `setMyCommands`,将 `chatid` 加入 Telegram 输入 `/` 后显示的命令建议列表。
+
 ## [1.2.0] - 2026-07-01
 
 ### Added

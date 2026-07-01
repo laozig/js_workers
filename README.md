@@ -116,7 +116,7 @@ flowchart LR
 
 - **Worker**：`onCall` `get_config` / `set_config` / `test` / `run` / `get_state`；`onCron` 负责事件检测；`onRoute` 只负责 Telegram webhook 注册、注销和 update 接收，不提供内置 `/ui`。
 - **扩展**（`notify-extension/`）：iframe 完整配置面板，用 NodeGet Token 调 `js-worker_run` → 轮询 `js-result_query`，和 Docker/流量监控一致。Telegram 的 `bot_token` / 通知目标列表 / `webhook_admin_secret` 可在扩展面板填（存 KV、打码回显）；每个通知目标可单独配置 Chat ID、话题 ID、离线、恢复、到期、流量和启用状态。离线/上线模板可使用 `{{clients}}`、`{{node_count}}`、`{{last_seen}}`、`{{offline_duration}}`、`{{offline_delay}}`、`{{tags}}` 等变量;到期/续费信息模板读取 `metadata_price`、`metadata_price_unit`、`metadata_price_cycle`、`metadata_expire_time` 与 `metadata_tags`;流量配额提醒模板可使用 `{{traffic_used}}`、`{{traffic_quota}}`、`{{traffic_percent}}`、`{{traffic_level}}`、`{{traffic_reset_day}}` 等变量。`{{event}}` 会按到期状态或流量使用率动态显示。worker token 建议给 Agent namespace 的 `metadata_*` 读权限;缺少标签/价格等可选字段权限时会降级为空。也可在 Telegram 内发送 `/chatid` 让 Bot 实时回复当前会话 ID。
-- **Telegram webhook**：worker 需设置 `route_name`（示例 `notify`），并确保该 HTTPS 路由可被 Telegram 访问；保存 Bot Token 后访问 `https://你的域名/nodeget/worker-route/notify/registerWebhook` 注册。如配置了 Webhook 管理密钥，注册、注销和查询时加 `?s=密钥`。注销为 `/unRegisterWebhook`，查询为 `/webhookInfo`。
+- **Telegram webhook**：worker 需设置 `route_name`（示例 `notify`），并确保该 HTTPS 路由可被 Telegram 访问；保存 Bot Token 后访问 `https://你的域名/nodeget/worker-route/notify/registerWebhook` 注册。注册成功时会同步把 `chatid` 写入 Telegram 命令列表,用户输入 `/` 时可看到该快捷命令。如配置了 Webhook 管理密钥，注册、注销和查询时加 `?s=密钥`。注销为 `/unRegisterWebhook`，查询为 `/webhookInfo`。
 - env：`token`（NodeGet 平台 Token，**不是** Telegram token）；`webhook_admin_secret`（可选，和扩展面板配置二选一或同时保留）。
 
 ## 四、日志清理 · log-cleanup
