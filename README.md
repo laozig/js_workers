@@ -55,7 +55,7 @@ flowchart LR
   server -->|cron| nf[notify-worker]
   server -->|cron| lc[log-cleanup-worker]
   tb <-->|KV 每节点 config/ledger| kv[(KV)]
-  su -->|crontab_create / task_query| ax[Agent execute 检测]
+  su -->|task_create_task_blocking / task_query| ax[Agent execute 检测]
   lc -->|crontab / execute| ax2[Agent execute: truncate 日志]
   nf -.->|inlineCall get_summary| tb
   nf -->|fetch sendMessage| tg[Telegram]
@@ -79,7 +79,7 @@ flowchart LR
 | Worker | route_name | 建议 Cron | 说明 |
 |---|---|---|---|
 | `traffic-billing-worker` | `traffic-billing` | `0 */5 * * * *` | 每 5 分钟审计流量 |
-| `stream-unlock-worker` | `stream-unlock` | `0 0 0,12 * * *` | 一天两次；首访 `GET /results` 或 `GET /run` 自举 |
+| `stream-unlock-worker` | `stream-unlock` | `0 */5 * * * *` | 每 5 分钟缓存结果；`GET /run` 实时探测 |
 | `notify-worker` | `notify` | `0 */2 * * * *` | 每 2 分钟检测事件；Telegram 在扩展面板填 |
 | `log-cleanup-worker` | `log-cleanup` | 无需 Server cron | 改用 `GET /install` 给各机装本地清理 cron |
 
@@ -103,11 +103,12 @@ flowchart LR
 
 ## 二、流媒体检测 · stream-unlock
 
-给目标 Agent 下发 `execute` 定时任务（`crontab_create`），Agent 本机 `curl -4/-6` 探测 YouTube Premium / Netflix，Server 端 `task_query` 聚合成 `/results`。首次自动安装长期 cron + `task_create_task_blocking` 补跑一次。
+不管理 cron 任务，由用户在平台手动创建 6 个 Agent 定时任务（`sh` 执行，`0 0 0,12 * * *`），Agent 本机 `curl -4/-6` 探测 YouTube Premium / Netflix。Worker 通过 `task_query` 按 `cron_source` 查询所有 Agent 的任务结果，自动发现 Agent UUID 并聚合返回。
 
-- **Worker**：`onCall` `list_targets` / `get_config` / `set_config` / `install_crons` / `list_crons` / `get_results`。HTTP `GET /results`（前端主题读）、`GET /run` 或 `POST /install`（立即安装+补跑）、`/targets` / `/config` / `/crons`。
-- **目标不固化**：默认每轮跟随全部 Agent；只有显式带 `uuids` 才锁定子集。
-- env：`token`（需 `Crontab::Write/Delete`、`Task::Create/Read(execute)`、`JsWorker::RunDefinedJsWorker`）。
+- **Worker**：`onCall` `list_targets` / `get_config` / `run_once` / `get_results`。HTTP `GET /results`（前端主题读）、`GET /run`（实时探测，阻塞 30-60s）、`/targets` / `/config`。
+- **目标不固化**：从结果中自动发现 UUID，无需配置；显式带 `uuids` 可过滤子集。
+- **缓存**：Server cron 每 5 分钟跑一次 `onCron` 缓存结果，`/results` 优先返回缓存。
+- env：`token`（需 `Task::Create/Read(execute)`、`JsWorker::RunDefinedJsWorker`）。
 - 展示口径只有四项：`YouTube IPv4` / `Netflix IPv4` / `YouTube IPv6` / `Netflix IPv6`（无 v6 出口的机器 v6 项为 `bad`，前端可隐藏）。
 
 ## 三、消息通知 · notify

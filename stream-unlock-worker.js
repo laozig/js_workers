@@ -1,21 +1,23 @@
 /**
- * stream-unlock-worker v3.0
+ * stream-unlock-worker v4.1
  *
- * Agent 定时任务编排器：
- * - 在每个 Agent 上创建定时 `execute` 任务
- * - Agent 本机发起 YouTube Premium / Netflix 探测
- * - 结果先落到 `/tmp/stream-unlock/*.json`
- * - `cat` 输出结果后自动删除文件
- * - 服务端统一通过 `task_query` 聚合结果
+ * 流媒体解锁结果聚合器：
+ * - 不管理 cron 任务，由用户手动创建定时任务（指定每台机器）
+ * - 通过 `task_query` 按 cron_source 查询所有 Agent 的任务结果
+ * - 自动从结果中发现 Agent UUID，无需配置 target_uuids
+ * - 支持 cleared_at 时间戳过滤老数据
  *
- * 入口:
- *   onCall / onInlineCall:
- *     list_targets / get_config / set_config / install_crons / list_crons / get_results
- *   onRoute:
- *     GET  /targets /config /crons /results
- *     POST /config /install
- *   onCron:
- *     自动 install_crons + get_results
+ * 路由（全部 GET）:
+ *   /targets           列出所有 Agent
+ *   /config            读取配置
+ *   /run               立即执行一次探测（阻塞等待结果）
+ *   /results           查询结果（query params: uuids 逗号分隔）
+ *
+ * onCall / onInlineCall:
+ *   list_targets / get_config / run_once / get_results
+ *
+ * onCron:
+ *   直接 queryResults（绕过缓存，始终查询最新数据）
  *
  * env:
  *   token:        NodeGet 平台 Token
@@ -28,10 +30,15 @@ var STATE_KEY = "stream_unlock_agent_state";
 var DEFAULT_CFG = {
   enabled: true,
   cron_prefix: "stream_unlock",
-  cron_expression: "0 0 0,12 * * *",
-  target_uuids: [],
-  bootstrap_on_install: true,
-  bootstrap_timeout_ms: 30000,
+  // cron_source 映射：逻辑名 -> 平台上的实际 cron 任务名
+  cron_source_map: {
+    youtube_ipv4: "YouTube IPv4",
+    youtube_ipv6: "YouTube IPv6",
+    netflix_ipv4_a: "Netflix IPv4 Part A",
+    netflix_ipv4_b: "Netflix IPv4 Part B",
+    netflix_ipv6_a: "Netflix IPv6 Part A",
+    netflix_ipv6_b: "Netflix IPv6 Part B",
+  },
   enable_youtube: true,
   enable_netflix: true,
   enable_ipv4: true,
@@ -64,10 +71,6 @@ function nowCST() {
     .slice(0, 19);
 }
 
-function randomId() {
-  return Date.now() + Math.floor(Math.random() * 1000000);
-}
-
 function uniq(list) {
   var seen = Object.create(null);
   var out = [];
@@ -87,29 +90,14 @@ async function rpc(method, params) {
   return response ? response.result : undefined;
 }
 
-async function rpcBatch(items) {
-  if (!items || !items.length) return [];
-  var response = await nodeget(items);
-  return response && response.result ? response.result : response;
-}
-
 function normalizeCfg(raw) {
   raw = raw && typeof raw === "object" ? raw : {};
   return {
     enabled: raw.enabled !== false,
     cron_prefix: String(raw.cron_prefix || DEFAULT_CFG.cron_prefix),
-    cron_expression: String(raw.cron_expression || DEFAULT_CFG.cron_expression),
-    target_uuids: Array.isArray(raw.target_uuids)
-      ? uniq(raw.target_uuids.map(String))
-      : [],
-    bootstrap_on_install: raw.bootstrap_on_install !== false,
-    bootstrap_timeout_ms: Math.max(
-      5000,
-      Math.min(
-        120000,
-        Number(raw.bootstrap_timeout_ms || DEFAULT_CFG.bootstrap_timeout_ms),
-      ),
-    ),
+    cron_source_map: (raw.cron_source_map && typeof raw.cron_source_map === "object")
+      ? raw.cron_source_map
+      : DEFAULT_CFG.cron_source_map,
     enable_youtube: raw.enable_youtube !== false,
     enable_netflix: raw.enable_netflix !== false,
     enable_ipv4: raw.enable_ipv4 !== false,
@@ -136,15 +124,6 @@ async function getCfg(token) {
   return normalizeCfg(value);
 }
 
-async function setCfg(token, cfg) {
-  await rpc("kv_set_value", {
-    token: token,
-    namespace: NS,
-    key: CFG_KEY,
-    value: cfg,
-  });
-}
-
 async function getState(token) {
   var value = await rpc("kv_get_value", {
     token: token,
@@ -152,20 +131,9 @@ async function getState(token) {
     key: STATE_KEY,
   });
   return {
-    last_install: (value && Number(value.last_install)) || 0,
     last_query: (value && Number(value.last_query)) || 0,
-    managed_names: Array.isArray(value && value.managed_names)
-      ? value.managed_names
-      : [],
-    target_uuids: Array.isArray(value && value.target_uuids)
-      ? value.target_uuids
-      : [],
     last_result: (value && value.last_result) || null,
-    cached_results:
-      value && value.cached_results && typeof value.cached_results === "object"
-        ? value.cached_results
-        : {},
-    last_bootstrap: (value && Number(value.last_bootstrap)) || 0,
+    cleared_at: (value && Number(value.cleared_at)) || 0,
   };
 }
 
@@ -176,20 +144,6 @@ async function setState(token, state) {
     key: STATE_KEY,
     value: state,
   });
-}
-
-function hasCachedBootstrapResults(state) {
-  var cached = state && state.cached_results;
-  if (!cached || typeof cached !== "object") return false;
-  for (var uuid in cached) {
-    if (!Object.prototype.hasOwnProperty.call(cached, uuid)) continue;
-    var rows = cached[uuid];
-    if (!rows || typeof rows !== "object") continue;
-    for (var cronSource in rows) {
-      if (Object.prototype.hasOwnProperty.call(rows, cronSource)) return true;
-    }
-  }
-  return false;
 }
 
 async function listAgentUuids(token) {
@@ -237,33 +191,8 @@ async function listTargets(token, onlyUuids) {
   });
 }
 
-function cronName(prefix, service, family, part) {
-  return prefix + "_" + service + "_" + family + (part ? "_" + part : "");
-}
-
-function getAllManagedNames(prefix) {
-  return [
-    cronName(prefix, "youtube", "ipv4"),
-    cronName(prefix, "youtube", "ipv6"),
-    cronName(prefix, "netflix", "ipv4", "a"),
-    cronName(prefix, "netflix", "ipv4", "b"),
-    cronName(prefix, "netflix", "ipv6", "a"),
-    cronName(prefix, "netflix", "ipv6", "b"),
-  ];
-}
-
-function makeExecuteTask(cmd, args) {
-  return {
-    task: {
-      execute: {
-        cmd: cmd,
-        args: args,
-      },
-    },
-  };
-}
-
-function buildYoutubeExecuteScript() {
+function buildYoutubeExecuteScript(curlTimeout) {
+  var maxTime = curlTimeout || 20;
   return [
     "set -eu",
     'job="$1"',
@@ -276,7 +205,7 @@ function buildYoutubeExecuteScript() {
     'mkdir -p "$result_dir"',
     'file="$result_dir/$job.json"',
     "ts=$(( $(date +%s) * 1000 ))",
-    'body="$(curl -sSL --max-time 20 $family_flag -A "$ua" -H "Accept-Language: $lang" -b "$cookie" "$url" 2>/dev/null || true)"',
+    'body="$(curl -sSL --max-time ' + maxTime + ' $family_flag -A "$ua" -H "Accept-Language: $lang" -b "$cookie" "$url" 2>/dev/null || true)"',
     'status="bad"',
     'region="n/a"',
     'case "$body" in',
@@ -294,7 +223,8 @@ function buildYoutubeExecuteScript() {
   ].join("\n");
 }
 
-function buildNetflixExecuteScript() {
+function buildNetflixExecuteScript(curlTimeout) {
+  var maxTime = curlTimeout || 20;
   return [
     "set -eu",
     'job="$1"',
@@ -307,13 +237,14 @@ function buildNetflixExecuteScript() {
     'mkdir -p "$result_dir"',
     'file="$result_dir/$job.json"',
     "ts=$(( $(date +%s) * 1000 ))",
-    'body="$(curl -sSL --max-time 20 $family_flag -A "$ua" -H "Accept-Language: $lang" "$url" 2>/dev/null || true)"',
+    "raw=\"$(curl -sSL --max-time " + maxTime + " $family_flag -A \"$ua\" -H \"Accept-Language: $lang\" -w '\\n%{url_effective}' \"$url\" 2>/dev/null || true)\"",
+    'loc="$(printf \'%s\\n\' "$raw" | tail -n1)"',
+    'body="$(printf \'%s\\n\' "$raw" | sed \'$d\')"',
     'if [ -z "$body" ]; then',
     '  printf \'{"service":"netflix","part":"%s","error":"empty response","region":"n/a","timestamp":%s}\\n\' "$part" "$ts" > "$file"',
     "else",
     "  blocked=false",
     "  if printf '%s' \"$body\" | grep -q 'Oh no!'; then blocked=true; fi",
-    '  loc="$(curl -sSL --max-time 10 $family_flag -A "$ua" -H "Accept-Language: $lang" -o /dev/null -w \'%{url_effective}\' "$url" 2>/dev/null || true)"',
     '  region="$(printf \'%s\' "$loc" | sed -n \'s#https\\?://www\\.netflix\\.com/\\([a-z][a-z]\\)\\(-[a-z][a-z]\\)\\?/.*#\\1#p\' | tr \'a-z\' \'A-Z\')"',
     '  [ -n "$region" ] || region="n/a"',
     '  printf \'{"service":"netflix","part":"%s","blocked":%s,"region":"%s","timestamp":%s}\\n\' "$part" "$blocked" "$region" "$ts" > "$file"',
@@ -321,356 +252,6 @@ function buildNetflixExecuteScript() {
     'cat "$file"',
     'rm -f "$file"',
   ].join("\n");
-}
-
-function buildCronSpecs(cfg, uuids) {
-  var specs = [];
-  if (!uuids.length) return specs;
-  var families = [];
-  if (cfg.enable_ipv4) families.push({ label: "ipv4", flag: "-4" });
-  if (cfg.enable_ipv6) families.push({ label: "ipv6", flag: "-6" });
-
-  for (var i = 0; i < families.length; i++) {
-    var family = families[i];
-
-    if (cfg.enable_youtube) {
-      var ytName = cronName(cfg.cron_prefix, "youtube", family.label);
-      specs.push({
-        name: ytName,
-        cron_expression: cfg.cron_expression,
-        cron_type: {
-          agent: [
-            uuids,
-            makeExecuteTask("sh", [
-              "-lc",
-              buildYoutubeExecuteScript(),
-              "sh",
-              ytName,
-              family.flag,
-              cfg.youtube_url,
-              cfg.youtube_cookies,
-              cfg.user_agent,
-              cfg.accept_language,
-              cfg.result_dir,
-            ]),
-          ],
-        },
-      });
-    }
-
-    if (cfg.enable_netflix) {
-      var nfAName = cronName(cfg.cron_prefix, "netflix", family.label, "a");
-      var nfBName = cronName(cfg.cron_prefix, "netflix", family.label, "b");
-      specs.push({
-        name: nfAName,
-        cron_expression: cfg.cron_expression,
-        cron_type: {
-          agent: [
-            uuids,
-            makeExecuteTask("sh", [
-              "-lc",
-              buildNetflixExecuteScript(),
-              "sh",
-              nfAName,
-              family.flag,
-              "https://www.netflix.com/title/" +
-                encodeURIComponent(cfg.netflix_title_a),
-              cfg.user_agent,
-              cfg.accept_language,
-              "a",
-              cfg.result_dir,
-            ]),
-          ],
-        },
-      });
-      specs.push({
-        name: nfBName,
-        cron_expression: cfg.cron_expression,
-        cron_type: {
-          agent: [
-            uuids,
-            makeExecuteTask("sh", [
-              "-lc",
-              buildNetflixExecuteScript(),
-              "sh",
-              nfBName,
-              family.flag,
-              "https://www.netflix.com/title/" +
-                encodeURIComponent(cfg.netflix_title_b),
-              cfg.user_agent,
-              cfg.accept_language,
-              "b",
-              cfg.result_dir,
-            ]),
-          ],
-        },
-      });
-    }
-  }
-
-  return specs;
-}
-
-function buildBootstrapSpecs(cfg, uuids) {
-  var cronSpecs = buildCronSpecs(cfg, uuids);
-  return cronSpecs.map(function (spec) {
-    return {
-      name: spec.name,
-      uuid_list: uuids,
-      task_type: spec.cron_type.agent[1].task,
-    };
-  });
-}
-
-function isManagedCron(name, prefix) {
-  return String(name || "").indexOf(prefix + "_") === 0;
-}
-
-async function getAllCrons(token) {
-  var rows = await rpc("crontab_get", { token: token });
-  return Array.isArray(rows) ? rows : [];
-}
-
-function mergeCachedTaskResult(cache, uuid, cronSource, taskRow) {
-  if (!cache[uuid]) cache[uuid] = {};
-  cache[uuid][cronSource] = {
-    success: !(taskRow && taskRow.success === false),
-    timestamp: (taskRow && taskRow.timestamp) || Date.now(),
-    error_message: (taskRow && taskRow.error_message) || null,
-    execute: getExecuteOutput(taskRow),
-  };
-}
-
-function cachedTaskRow(state, cronSource, uuid) {
-  var cached =
-    state &&
-    state.cached_results &&
-    state.cached_results[uuid] &&
-    state.cached_results[uuid][cronSource];
-  if (!cached) return null;
-  return {
-    success: cached.success !== false,
-    timestamp: cached.timestamp || null,
-    error_message: cached.error_message || null,
-    task_event_result: {
-      execute: cached.execute || "",
-    },
-  };
-}
-
-function pickLatestTask(taskRow, cachedRow) {
-  if (!taskRow) return cachedRow || null;
-  if (!cachedRow) return taskRow;
-  var taskTs = Number(taskRow.timestamp || 0);
-  var cachedTs = Number(cachedRow.timestamp || 0);
-  return cachedTs >= taskTs ? cachedRow : taskRow;
-}
-
-async function runBootstrapTasks(token, cfg, targetUuids) {
-  if (!cfg.bootstrap_on_install) {
-    return {
-      ok: true,
-      skipped: true,
-      reason: "bootstrap disabled",
-      cached_results: {},
-    };
-  }
-
-  var specs = buildBootstrapSpecs(cfg, targetUuids);
-  if (!specs.length) {
-    return {
-      ok: true,
-      skipped: true,
-      reason: "no bootstrap specs",
-      cached_results: {},
-    };
-  }
-
-  var cachedResults = {};
-  var failedCount = 0;
-  var jobs = [];
-
-  for (var i = 0; i < specs.length; i++) {
-    var spec = specs[i];
-    for (var j = 0; j < spec.uuid_list.length; j++) {
-      jobs.push(
-        (function (item, uuid) {
-          return rpc("task_create_task_blocking", {
-            token: token,
-            target_uuid: uuid,
-            timeout_ms: cfg.bootstrap_timeout_ms,
-            task_type: item.task_type,
-          })
-            .then(function (taskRow) {
-              mergeCachedTaskResult(cachedResults, uuid, item.name, taskRow);
-              return taskRow;
-            })
-            .catch(function (e) {
-              failedCount++;
-              mergeCachedTaskResult(cachedResults, uuid, item.name, {
-                success: false,
-                timestamp: Date.now(),
-                error_message: String(e && e.message ? e.message : e),
-                task_event_result: { execute: "" },
-              });
-              return null;
-            });
-        })(spec, spec.uuid_list[j]),
-      );
-    }
-  }
-
-  await Promise.all(jobs);
-  return {
-    ok: failedCount === 0,
-    skipped: false,
-    task_count: specs.length,
-    job_count: jobs.length,
-    failed_count: failedCount,
-    cached_results: cachedResults,
-  };
-}
-
-async function resolveTargetUuids(token, explicitUuids, cfg) {
-  if (Array.isArray(explicitUuids) && explicitUuids.length)
-    return uniq(explicitUuids.map(String));
-  if (cfg && Array.isArray(cfg.target_uuids) && cfg.target_uuids.length)
-    return uniq(cfg.target_uuids.map(String));
-  return await listAgentUuids(token);
-}
-
-async function installCrons(token, params) {
-  var cfg = await getCfg(token);
-  var prevState = await getState(token);
-  var targetUuids = await resolveTargetUuids(
-    token,
-    params && params.uuids,
-    cfg,
-  );
-  if (!targetUuids.length) return { ok: false, error: "no target agents" };
-
-  // 只有显式指定 uuids（主动限定子集）时才持久化目标列表；
-  // 自动解析出的全量目标不写回，保持 target_uuids 为空，使每轮都跟随当前全部 Agent。
-  var explicitUuids =
-    Array.isArray(params && params.uuids) && params.uuids.length
-      ? uniq(params.uuids.map(String))
-      : null;
-  if (explicitUuids && (!params || params.persist_targets !== false)) {
-    cfg.target_uuids = explicitUuids;
-    await setCfg(token, cfg);
-  }
-
-  var specs = buildCronSpecs(cfg, targetUuids);
-  var wanted = Object.create(null);
-  for (var i = 0; i < specs.length; i++) wanted[specs[i].name] = true;
-
-  var existing = await getAllCrons(token);
-  var existingMap = Object.create(null);
-  for (var j = 0; j < existing.length; j++)
-    existingMap[existing[j].name] = existing[j];
-
-  var batch = [];
-  for (var k = 0; k < specs.length; k++) {
-    var spec = specs[k];
-    batch.push({
-      jsonrpc: "2.0",
-      method: existingMap[spec.name] ? "crontab_edit" : "crontab_create",
-      params: {
-        token: token,
-        name: spec.name,
-        cron_expression: spec.cron_expression,
-        cron_type: spec.cron_type,
-      },
-      id: randomId(),
-    });
-    batch.push({
-      jsonrpc: "2.0",
-      method: "crontab_set_enable",
-      params: {
-        token: token,
-        name: spec.name,
-        enable: true,
-      },
-      id: randomId(),
-    });
-  }
-
-  var allNames = getAllManagedNames(cfg.cron_prefix);
-  for (var m = 0; m < allNames.length; m++) {
-    var staleName = allNames[m];
-    if (wanted[staleName]) continue;
-    if (!existingMap[staleName]) continue;
-    batch.push({
-      jsonrpc: "2.0",
-      method: "crontab_set_enable",
-      params: {
-        token: token,
-        name: staleName,
-        enable: false,
-      },
-      id: randomId(),
-    });
-  }
-
-  await rpcBatch(batch);
-
-  var shouldBootstrap = false;
-  if (params && params.bootstrap_now === true) shouldBootstrap = true;
-  else if (params && params.bootstrap_now === false) shouldBootstrap = false;
-  else if (params && params.bootstrap_if_missing)
-    shouldBootstrap = !prevState.last_install;
-
-  var bootstrap = {
-    ok: true,
-    skipped: true,
-    reason: "bootstrap not requested",
-    cached_results: prevState.cached_results || {},
-  };
-  if (shouldBootstrap) {
-    bootstrap = await runBootstrapTasks(token, cfg, targetUuids);
-  }
-
-  await setState(token, {
-    last_install: Date.now(),
-    last_query: prevState.last_query || 0,
-    managed_names: specs.map(function (item) {
-      return item.name;
-    }),
-    target_uuids: targetUuids,
-    last_result: prevState.last_result || null,
-    cached_results: bootstrap.cached_results || prevState.cached_results || {},
-    last_bootstrap: shouldBootstrap
-      ? Date.now()
-      : prevState.last_bootstrap || 0,
-  });
-
-  return {
-    ok: true,
-    installed: specs.map(function (item) {
-      return item.name;
-    }),
-    target_uuids: targetUuids,
-    cron_expression: cfg.cron_expression,
-    bootstrap: {
-      ok: bootstrap.ok,
-      skipped: bootstrap.skipped,
-      reason: bootstrap.reason || null,
-      task_count: bootstrap.task_count || 0,
-      job_count: bootstrap.job_count || 0,
-      failed_count: bootstrap.failed_count || 0,
-    },
-  };
-}
-
-async function listCrons(token, cfg) {
-  cfg = cfg || (await getCfg(token));
-  var crons = await getAllCrons(token);
-  return {
-    ok: true,
-    items: crons.filter(function (item) {
-      return isManagedCron(item.name, cfg.cron_prefix);
-    }),
-  };
 }
 
 function getExecuteOutput(taskRow) {
@@ -724,37 +305,51 @@ function parseExecuteJson(taskRow) {
   }
 }
 
-async function queryLatestTask(token, cronSource, uuid) {
+/**
+ * 按 cron_source 查询所有 Agent 的任务，返回 { uuid -> taskRow } 映射。
+ * 不指定 uuid，让 task_query 返回所有命中的行。
+ * @param {number} [since] - 只保留 timestamp >= since 的结果
+ */
+async function queryAllTasksByCron(token, cronSource, since) {
   var rows = await rpc("task_query", {
     token: token,
     task_data_query: {
       condition: [
         { cron_source: cronSource },
-        { uuid: uuid },
         { type: "execute" },
-        { limit: 5 },
+        { limit: 200 },
       ],
     },
   });
-  if (!Array.isArray(rows) || !rows.length) return null;
+  var map = Object.create(null);
+  if (!Array.isArray(rows)) return map;
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
-    if (row && row.success !== null && row.success !== undefined) return row;
-    if (row && row.task_event_result) return row;
-    if (row && row.error_message) return row;
+    var uuid = row && row.uuid;
+    if (!uuid) continue;
+    // 过滤清除之前的老结果
+    if (since && Number(row.timestamp || 0) < since) continue;
+    // 每个 uuid 只保留最新一条有效结果
+    if (!map[uuid]) {
+      if (row.success !== null && row.success !== undefined) map[uuid] = row;
+      else if (row.task_event_result) map[uuid] = row;
+      else if (row.error_message) map[uuid] = row;
+    }
   }
-  return rows[0];
+  return map;
 }
 
 function parseYouTubeTask(taskRow) {
   var row = parseExecuteJson(taskRow);
   if (!row) return { status: "pending", region: "n/a", timestamp: null };
-  return {
+  var out = {
     status: row.status || "bad",
     region: row.region || "n/a",
     timestamp: row.timestamp || taskRow.timestamp || null,
     error: row.error || null,
   };
+  if (row.raw) out.raw = row.raw;
+  return out;
 }
 
 function parseNetflixTasks(taskA, taskB) {
@@ -792,106 +387,275 @@ function parseNetflixTasks(taskA, taskB) {
   var region = rowB.region || rowA.region || "n/a";
   var blockedA = rowA.blocked === true;
   var blockedB = rowB.blocked === true;
+  var ts =
+    Math.max(Number(rowA.timestamp || 0), Number(rowB.timestamp || 0)) || null;
   if (blockedA && blockedB)
-    return {
-      status: "org",
-      region: region,
-      timestamp:
-        Math.max(Number(rowA.timestamp || 0), Number(rowB.timestamp || 0)) ||
-        null,
-    };
-  if (!blockedA || !blockedB)
-    return {
-      status: "yes",
-      region: region,
-      timestamp:
-        Math.max(Number(rowA.timestamp || 0), Number(rowB.timestamp || 0)) ||
-        null,
-    };
-  return {
-    status: "no",
-    region: "n/a",
-    timestamp:
-      Math.max(Number(rowA.timestamp || 0), Number(rowB.timestamp || 0)) ||
-      null,
-  };
+    return { status: "org", region: region, timestamp: ts };
+  if (!blockedA && !blockedB)
+    return { status: "yes", region: region, timestamp: ts };
+  return { status: "no", region: region, timestamp: ts };
 }
 
-async function getResults(token, params) {
-  var cfg = await getCfg(token);
-  var state = await getState(token);
-  var targetUuids = await resolveTargetUuids(
-    token,
-    params && params.uuids,
-    cfg,
-  );
-  var targets = await listTargets(token, targetUuids);
-  var items = [];
+var CACHE_TTL_MS = 6 * 60 * 1000;
 
-  for (var i = 0; i < targets.length; i++) {
-    var target = targets[i];
-    var youtubeIpv4 = null;
-    var youtubeIpv6 = null;
-    var netflixIpv4 = null;
-    var netflixIpv6 = null;
-
-    if (cfg.enable_youtube && cfg.enable_ipv4) {
-      var yt4 = cronName(cfg.cron_prefix, "youtube", "ipv4");
-      youtubeIpv4 = parseYouTubeTask(
-        pickLatestTask(
-          await queryLatestTask(token, yt4, target.uuid),
-          cachedTaskRow(state, yt4, target.uuid),
-        ),
-      );
+function hasUsableData(result) {
+  if (!result || !result.agents || !result.agents.length) return false;
+  for (var i = 0; i < result.agents.length; i++) {
+    var a = result.agents[i];
+    var services = [];
+    if (a.youtube) {
+      if (a.youtube.ipv4) services.push(a.youtube.ipv4);
+      if (a.youtube.ipv6) services.push(a.youtube.ipv6);
     }
-    if (cfg.enable_youtube && cfg.enable_ipv6) {
-      var yt6 = cronName(cfg.cron_prefix, "youtube", "ipv6");
-      youtubeIpv6 = parseYouTubeTask(
-        pickLatestTask(
-          await queryLatestTask(token, yt6, target.uuid),
-          cachedTaskRow(state, yt6, target.uuid),
-        ),
-      );
+    if (a.netflix) {
+      if (a.netflix.ipv4) services.push(a.netflix.ipv4);
+      if (a.netflix.ipv6) services.push(a.netflix.ipv6);
+    }
+    for (var j = 0; j < services.length; j++) {
+      var s = services[j].status;
+      if (s && s !== "bad" && s !== "pending") return true;
+    }
+  }
+  return false;
+}
+
+function usableCount(result) {
+  if (!result || !result.agents || !result.agents.length) return 0;
+  var n = 0;
+  for (var i = 0; i < result.agents.length; i++) {
+    var a = result.agents[i];
+    var slots = [];
+    if (a.youtube) { slots.push(a.youtube.ipv4, a.youtube.ipv6); }
+    if (a.netflix) { slots.push(a.netflix.ipv4, a.netflix.ipv6); }
+    for (var j = 0; j < slots.length; j++) {
+      if (slots[j] && slots[j].status && slots[j].status !== "bad" && slots[j].status !== "pending") n++;
+    }
+  }
+  return n;
+}
+
+async function queryResults(token, params) {
+  var setup = await Promise.all([getCfg(token), getState(token)]);
+  var cfg = setup[0];
+  var state = setup[1];
+
+  var csm = cfg.cron_source_map || {};
+  var cronSources = [];
+  if (cfg.enable_youtube && cfg.enable_ipv4 && csm.youtube_ipv4) cronSources.push(csm.youtube_ipv4);
+  if (cfg.enable_youtube && cfg.enable_ipv6 && csm.youtube_ipv6) cronSources.push(csm.youtube_ipv6);
+  if (cfg.enable_netflix && cfg.enable_ipv4) {
+    if (csm.netflix_ipv4_a) cronSources.push(csm.netflix_ipv4_a);
+    if (csm.netflix_ipv4_b) cronSources.push(csm.netflix_ipv4_b);
+  }
+  if (cfg.enable_netflix && cfg.enable_ipv6) {
+    if (csm.netflix_ipv6_a) cronSources.push(csm.netflix_ipv6_a);
+    if (csm.netflix_ipv6_b) cronSources.push(csm.netflix_ipv6_b);
+  }
+
+  var since = state.cleared_at || 0;
+  var allMaps = await Promise.all(
+    cronSources.map(function (name) { return queryAllTasksByCron(token, name, since); })
+  );
+
+  var uuidSet = Object.create(null);
+  for (var m = 0; m < allMaps.length; m++) {
+    for (var u in allMaps[m]) {
+      if (Object.prototype.hasOwnProperty.call(allMaps[m], u)) uuidSet[u] = true;
+    }
+  }
+
+  var filterUuids = null;
+  if (params && Array.isArray(params.uuids) && params.uuids.length) {
+    filterUuids = Object.create(null);
+    for (var f = 0; f < params.uuids.length; f++) filterUuids[String(params.uuids[f])] = true;
+  }
+
+  var cronIndex = Object.create(null);
+  for (var c = 0; c < cronSources.length; c++) cronIndex[cronSources[c]] = allMaps[c];
+
+  var allUuids = Object.keys(uuidSet);
+  if (filterUuids) allUuids = allUuids.filter(function (u) { return filterUuids[u]; });
+  var names = await getNameMap(token, allUuids);
+
+  var items = [];
+  for (var i = 0; i < allUuids.length; i++) {
+    var uuid = allUuids[i];
+    var yt4 = null, yt6 = null, nf4 = null, nf6 = null;
+
+    if (cfg.enable_youtube && cfg.enable_ipv4 && csm.youtube_ipv4) {
+      yt4 = parseYouTubeTask(cronIndex[csm.youtube_ipv4] && cronIndex[csm.youtube_ipv4][uuid] || null);
+    }
+    if (cfg.enable_youtube && cfg.enable_ipv6 && csm.youtube_ipv6) {
+      yt6 = parseYouTubeTask(cronIndex[csm.youtube_ipv6] && cronIndex[csm.youtube_ipv6][uuid] || null);
     }
     if (cfg.enable_netflix && cfg.enable_ipv4) {
-      var nf4a = cronName(cfg.cron_prefix, "netflix", "ipv4", "a");
-      var nf4b = cronName(cfg.cron_prefix, "netflix", "ipv4", "b");
-      netflixIpv4 = parseNetflixTasks(
-        pickLatestTask(
-          await queryLatestTask(token, nf4a, target.uuid),
-          cachedTaskRow(state, nf4a, target.uuid),
-        ),
-        pickLatestTask(
-          await queryLatestTask(token, nf4b, target.uuid),
-          cachedTaskRow(state, nf4b, target.uuid),
-        ),
+      nf4 = parseNetflixTasks(
+        csm.netflix_ipv4_a && cronIndex[csm.netflix_ipv4_a] && cronIndex[csm.netflix_ipv4_a][uuid] || null,
+        csm.netflix_ipv4_b && cronIndex[csm.netflix_ipv4_b] && cronIndex[csm.netflix_ipv4_b][uuid] || null
       );
     }
     if (cfg.enable_netflix && cfg.enable_ipv6) {
-      var nf6a = cronName(cfg.cron_prefix, "netflix", "ipv6", "a");
-      var nf6b = cronName(cfg.cron_prefix, "netflix", "ipv6", "b");
-      netflixIpv6 = parseNetflixTasks(
-        pickLatestTask(
-          await queryLatestTask(token, nf6a, target.uuid),
-          cachedTaskRow(state, nf6a, target.uuid),
-        ),
-        pickLatestTask(
-          await queryLatestTask(token, nf6b, target.uuid),
-          cachedTaskRow(state, nf6b, target.uuid),
-        ),
+      nf6 = parseNetflixTasks(
+        csm.netflix_ipv6_a && cronIndex[csm.netflix_ipv6_a] && cronIndex[csm.netflix_ipv6_a][uuid] || null,
+        csm.netflix_ipv6_b && cronIndex[csm.netflix_ipv6_b] && cronIndex[csm.netflix_ipv6_b][uuid] || null
       );
     }
 
     items.push({
-      uuid: target.uuid,
-      name: target.name,
+      uuid: uuid,
+      name: (typeof names.get(uuid) === "string" && names.get(uuid)) ? names.get(uuid) : uuid.slice(0, 8),
+      youtube: { ipv4: yt4, ipv6: yt6 },
+      netflix: { ipv4: nf4, ipv6: nf6 },
+    });
+  }
+
+  var result = {
+    ok: true,
+    generated_at: Date.now(),
+    time: nowCST(),
+    count: items.length,
+    agents: items,
+  };
+
+  state.last_query = Date.now();
+  var cachedFresh = state.last_result && state.last_result.generated_at
+    && (Date.now() - state.last_result.generated_at < CACHE_TTL_MS);
+  if (!hasUsableData(state.last_result)) {
+    state.last_result = result;
+  } else if (hasUsableData(result)) {
+    if (!cachedFresh || usableCount(result) >= usableCount(state.last_result)) {
+      state.last_result = result;
+    }
+  }
+  await setState(token, state);
+  return result;
+}
+
+async function getResults(token, params) {
+  var state = await getState(token);
+  var cached = state.last_result;
+  if (cached && cached.generated_at && hasUsableData(cached)) {
+    if (Date.now() - cached.generated_at < CACHE_TTL_MS) return cached;
+  }
+  var fresh = await queryResults(token, params);
+  if (hasUsableData(fresh)) return fresh;
+  if (hasUsableData(cached)) return cached;
+  return fresh;
+}
+
+async function runOnce(token, params) {
+  var startTime = Date.now();
+  var DEADLINE_MS = 23000;
+
+  var setup = await Promise.all([getCfg(token), listAgentUuids(token)]);
+  var cfg = setup[0];
+  var targetUuids = setup[1];
+
+  if (params && params.uuids) {
+    var filter = typeof params.uuids === "string" ? params.uuids.split(",") : (Array.isArray(params.uuids) ? params.uuids : []);
+    if (filter.length) {
+      var filterSet = Object.create(null);
+      for (var f = 0; f < filter.length; f++) { var fv = String(filter[f]).trim(); if (fv) filterSet[fv] = true; }
+      targetUuids = targetUuids.filter(function (u) { return filterSet[u]; });
+    }
+  }
+
+  if (!targetUuids.length) return { ok: false, error: "no agents found" };
+
+  var curlTimeout = targetUuids.length > 10 ? 10 : 20;
+  var rpcTimeout = targetUuids.length > 10 ? 13000 : 25000;
+
+  var csm = cfg.cron_source_map || {};
+  var taskDefs = [];
+
+  if (cfg.enable_youtube) {
+    if (cfg.enable_ipv4 && csm.youtube_ipv4)
+      taskDefs.push({ key: "yt4", script: buildYoutubeExecuteScript(curlTimeout), args: [csm.youtube_ipv4, "-4", cfg.youtube_url, cfg.youtube_cookies, cfg.user_agent, cfg.accept_language, cfg.result_dir] });
+    if (cfg.enable_ipv6 && csm.youtube_ipv6)
+      taskDefs.push({ key: "yt6", script: buildYoutubeExecuteScript(curlTimeout), args: [csm.youtube_ipv6, "-6", cfg.youtube_url, cfg.youtube_cookies, cfg.user_agent, cfg.accept_language, cfg.result_dir] });
+  }
+  if (cfg.enable_netflix) {
+    if (cfg.enable_ipv4) {
+      if (csm.netflix_ipv4_a) taskDefs.push({ key: "nf4a", script: buildNetflixExecuteScript(curlTimeout), args: [csm.netflix_ipv4_a, "-4", "https://www.netflix.com/title/" + encodeURIComponent(cfg.netflix_title_a), cfg.user_agent, cfg.accept_language, "a", cfg.result_dir] });
+      if (csm.netflix_ipv4_b) taskDefs.push({ key: "nf4b", script: buildNetflixExecuteScript(curlTimeout), args: [csm.netflix_ipv4_b, "-4", "https://www.netflix.com/title/" + encodeURIComponent(cfg.netflix_title_b), cfg.user_agent, cfg.accept_language, "b", cfg.result_dir] });
+    }
+    if (cfg.enable_ipv6) {
+      if (csm.netflix_ipv6_a) taskDefs.push({ key: "nf6a", script: buildNetflixExecuteScript(curlTimeout), args: [csm.netflix_ipv6_a, "-6", "https://www.netflix.com/title/" + encodeURIComponent(cfg.netflix_title_a), cfg.user_agent, cfg.accept_language, "a", cfg.result_dir] });
+      if (csm.netflix_ipv6_b) taskDefs.push({ key: "nf6b", script: buildNetflixExecuteScript(curlTimeout), args: [csm.netflix_ipv6_b, "-6", "https://www.netflix.com/title/" + encodeURIComponent(cfg.netflix_title_b), cfg.user_agent, cfg.accept_language, "b", cfg.result_dir] });
+    }
+  }
+
+  var BATCH_SIZE = targetUuids.length > 10 ? targetUuids.length : 5;
+  var results = Object.create(null);
+  var skippedUuids = [];
+
+  for (var batchStart = 0; batchStart < targetUuids.length; batchStart += BATCH_SIZE) {
+    var elapsed = Date.now() - startTime;
+    var remaining = DEADLINE_MS - elapsed;
+    if (remaining < 3000) {
+      for (var rem = batchStart; rem < targetUuids.length; rem++) skippedUuids.push(targetUuids[rem]);
+      break;
+    }
+    var batchTimeout = Math.min(rpcTimeout, remaining - 2000);
+    if (batchTimeout < 5000) batchTimeout = 5000;
+    var batchUuids = targetUuids.slice(batchStart, batchStart + BATCH_SIZE);
+    var jobs = [];
+    var jobMeta = [];
+
+    for (var t = 0; t < taskDefs.length; t++) {
+      for (var u = 0; u < batchUuids.length; u++) {
+        jobMeta.push({ uuid: batchUuids[u], key: taskDefs[t].key });
+        jobs.push(
+          rpc("task_create_task_blocking", {
+            token: token,
+            target_uuid: batchUuids[u],
+            timeout_ms: batchTimeout,
+            task_type: {
+              execute: {
+                cmd: "sh",
+                args: ["-lc", taskDefs[t].script, "sh"].concat(taskDefs[t].args),
+              },
+            },
+          }).catch(function (e) {
+            return { success: false, error_message: String(e && e.message ? e.message : e) };
+          })
+        );
+      }
+    }
+
+    var taskRows = await Promise.all(jobs);
+    for (var i = 0; i < taskRows.length; i++) {
+      var meta = jobMeta[i];
+      var row = taskRows[i];
+      if (!results[meta.uuid]) results[meta.uuid] = {};
+      results[meta.uuid][meta.key] = row;
+    }
+  }
+
+  for (var s = 0; s < skippedUuids.length; s++) {
+    results[skippedUuids[s]] = results[skippedUuids[s]] || {};
+    for (var sk = 0; sk < taskDefs.length; sk++) {
+      results[skippedUuids[s]][taskDefs[sk].key] = { success: false, error_message: "skipped: time limit" };
+    }
+  }
+
+  var allUuids = Object.keys(results);
+  var names = await getNameMap(token, allUuids);
+
+  var items = [];
+  for (var j = 0; j < allUuids.length; j++) {
+    var uuid = allUuids[j];
+    var r = results[uuid];
+    items.push({
+      uuid: uuid,
+      name: (typeof names.get(uuid) === "string" && names.get(uuid)) ? names.get(uuid) : uuid.slice(0, 8),
       youtube: {
-        ipv4: youtubeIpv4,
-        ipv6: youtubeIpv6,
+        ipv4: r.yt4 ? parseYouTubeTask(r.yt4) : null,
+        ipv6: r.yt6 ? parseYouTubeTask(r.yt6) : null,
       },
       netflix: {
-        ipv4: netflixIpv4,
-        ipv6: netflixIpv6,
+        ipv4: (r.nf4a || r.nf4b) ? parseNetflixTasks(r.nf4a || null, r.nf4b || null) : null,
+        ipv6: (r.nf6a || r.nf6b) ? parseNetflixTasks(r.nf6a || null, r.nf6b || null) : null,
       },
     });
   }
@@ -901,33 +665,17 @@ async function getResults(token, params) {
     generated_at: Date.now(),
     time: nowCST(),
     count: items.length,
-    cron_expression: cfg.cron_expression,
     agents: items,
   };
+  if (skippedUuids.length) result.skipped = skippedUuids.length;
 
   var state = await getState(token);
   state.last_query = Date.now();
-  state.last_result = result;
+  if (hasUsableData(result) || !hasUsableData(state.last_result)) {
+    state.last_result = result;
+  }
   await setState(token, state);
   return result;
-}
-
-async function runOnce(token, params) {
-  var installParams = Object.assign({}, params || {});
-  installParams.bootstrap_if_missing = true;
-  await installCrons(token, installParams);
-  return await getResults(token, params || {});
-}
-
-async function maybeBootstrap(token, params) {
-  var state = await getState(token);
-  if (!state || !state.last_install) {
-    return await runOnce(token, params || {});
-  }
-  if (state.last_bootstrap > 0 || hasCachedBootstrapResults(state)) return null;
-  var installParams = Object.assign({ bootstrap_now: true }, params || {});
-  await installCrons(token, installParams);
-  return await getResults(token, params || {});
 }
 
 async function dispatch(token, params, ctx) {
@@ -942,21 +690,10 @@ async function dispatch(token, params, ctx) {
       config: await getCfg(token),
       state: await getState(token),
     };
-  if (action === "set_config") {
-    var incoming = params.config || params;
-    var current = await getCfg(token);
-    var next = normalizeCfg(Object.assign({}, current, incoming));
-    await setCfg(token, next);
-    return { ok: true, config: next };
+  if (action === "run_once") {
+    return await runOnce(token, params || {});
   }
-  if (action === "install_crons") {
-    var installParams = Object.assign({ bootstrap_now: true }, params || {});
-    return await installCrons(token, installParams);
-  }
-  if (action === "list_crons") return await listCrons(token);
   if (action === "get_results") {
-    var bootstrap = await maybeBootstrap(token, params || {});
-    if (bootstrap) return bootstrap;
     return await getResults(token, params || {});
   }
 
@@ -967,7 +704,7 @@ export default {
   async onCron(params, env, ctx) {
     var token = env && env.token;
     try {
-      return await runOnce(token, params || {});
+      return await queryResults(token, params || {});
     } catch (e) {
       return { ok: false, error: String(e && e.message ? e.message : e) };
     }
@@ -1004,39 +741,37 @@ export default {
         status: 204,
         headers: {
           "access-control-allow-origin": "*",
-          "access-control-allow-methods": "GET,POST,OPTIONS",
+          "access-control-allow-methods": "GET,OPTIONS",
           "access-control-allow-headers": "content-type",
         },
       });
     }
 
     try {
+      // GET /targets — 列出所有 Agent
       if (method === "GET" && path.endsWith("/targets"))
         return json(await dispatch(token, { action: "list_targets" }, ctx));
+
+      // GET /config — 读取配置
       if (method === "GET" && path.endsWith("/config"))
         return json(await dispatch(token, { action: "get_config" }, ctx));
-      if (method === "POST" && path.endsWith("/config"))
-        return json(
-          await dispatch(
-            token,
-            { action: "set_config", config: await request.json() },
-            ctx,
-          ),
-        );
-      if (method === "POST" && path.endsWith("/install"))
-        return json(
-          await dispatch(
-            token,
-            Object.assign({ action: "install_crons" }, await request.json()),
-            ctx,
-          ),
-        );
-      if (method === "GET" && path.endsWith("/run"))
-        return json(await dispatch(token, { action: "install_crons" }, ctx));
-      if (method === "GET" && path.endsWith("/crons"))
-        return json(await dispatch(token, { action: "list_crons" }, ctx));
-      if (method === "GET" && path.endsWith("/results"))
-        return json(await dispatch(token, { action: "get_results" }, ctx));
+
+      // GET /run — 立即执行一次探测（阻塞等待结果）
+      if (method === "GET" && path.endsWith("/run")) {
+        var runParams = { action: "run_once" };
+        if (url.searchParams.has("uuids"))
+          runParams.uuids = url.searchParams.get("uuids").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+        return json(await dispatch(token, runParams, ctx));
+      }
+
+      // GET /results?uuids=a,b,c — 查询结果
+      if (method === "GET" && path.endsWith("/results")) {
+        var resultParams = {};
+        if (url.searchParams.has("uuids"))
+          resultParams.uuids = url.searchParams.get("uuids").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+        return json(await dispatch(token, Object.assign({ action: "get_results" }, resultParams), ctx));
+      }
+
       return json({ ok: false, error: "not found" }, 404);
     } catch (e) {
       return json(
