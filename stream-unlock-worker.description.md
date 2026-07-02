@@ -111,7 +111,7 @@
 ### 3. Netflix IPv4 Part A
 
 ```
--c 'ts=$(($(date +%s)*1000));raw=$(curl -sSL --max-time 20 -4 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" -H "Accept-Language: en" -w "\n%{url_effective}" "https://www.netflix.com/title/81280792" 2>/dev/null||true);loc=$(printf "%s\n" "$raw"|tail -n1);body=$(printf "%s\n" "$raw"|sed "\$d");if [ -z "$body" ];then printf "{\"service\":\"netflix\",\"part\":\"a\",\"error\":\"empty response\",\"region\":\"n/a\",\"timestamp\":%s}\n" "$ts";else blocked=false;if printf "%s" "$body"|grep -q "Oh no!";then blocked=true;fi;r=$(printf "%s" "$loc"|sed -n "s#https\?://www\.netflix\.com/\([a-z][a-z]\)\(-[a-z][a-z]\)\?/.*#\1#p"|tr a-z A-Z);[ -n "$r" ]||r=n/a;printf "{\"service\":\"netflix\",\"part\":\"a\",\"blocked\":%s,\"region\":\"%s\",\"timestamp\":%s}\n" "$blocked" "$r" "$ts";fi'
+-c 'ts=$(($(date +%s)*1000));raw=$(curl -sSL --max-time 20 -4 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" -H "Accept-Language: en" -w "\n%{url_effective}" "https://www.netflix.com/title/81280792" 2>/dev/null||true);loc=$(printf "%s\n" "$raw"|tail -n1);body=$(printf "%s\n" "$raw"|sed "\$d");if [ -z "$body" ];then printf "{\"service\":\"netflix\",\"part\":\"a\",\"error\":\"empty response\",\"region\":\"n/a\",\"timestamp\":%s}\n" "$ts";else blocked=false;if ! printf "%s" "$loc"|grep -q "/title/";then blocked=true;fi;r=$(printf "%s" "$loc"|sed -n "s#.*/\([a-z][a-z]\)\(-[a-z][a-z]\)\?/.*#\1#p"|tr a-z A-Z);[ -n "$r" ]||r=n/a;printf "{\"service\":\"netflix\",\"part\":\"a\",\"blocked\":%s,\"region\":\"%s\",\"timestamp\":%s}\n" "$blocked" "$r" "$ts";fi'
 ```
 
 ---
@@ -119,7 +119,7 @@
 ### 4. Netflix IPv4 Part B
 
 ```
--c 'ts=$(($(date +%s)*1000));raw=$(curl -sSL --max-time 20 -4 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" -H "Accept-Language: en" -w "\n%{url_effective}" "https://www.netflix.com/title/70143836" 2>/dev/null||true);loc=$(printf "%s\n" "$raw"|tail -n1);body=$(printf "%s\n" "$raw"|sed "\$d");if [ -z "$body" ];then printf "{\"service\":\"netflix\",\"part\":\"b\",\"error\":\"empty response\",\"region\":\"n/a\",\"timestamp\":%s}\n" "$ts";else blocked=false;if printf "%s" "$body"|grep -q "Oh no!";then blocked=true;fi;r=$(printf "%s" "$loc"|sed -n "s#https\?://www\.netflix\.com/\([a-z][a-z]\)\(-[a-z][a-z]\)\?/.*#\1#p"|tr a-z A-Z);[ -n "$r" ]||r=n/a;printf "{\"service\":\"netflix\",\"part\":\"b\",\"blocked\":%s,\"region\":\"%s\",\"timestamp\":%s}\n" "$blocked" "$r" "$ts";fi'
+-c 'ts=$(($(date +%s)*1000));raw=$(curl -sSL --max-time 20 -4 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" -H "Accept-Language: en" -w "\n%{url_effective}" "https://www.netflix.com/title/70143836" 2>/dev/null||true);loc=$(printf "%s\n" "$raw"|tail -n1);body=$(printf "%s\n" "$raw"|sed "\$d");if [ -z "$body" ];then printf "{\"service\":\"netflix\",\"part\":\"b\",\"error\":\"empty response\",\"region\":\"n/a\",\"timestamp\":%s}\n" "$ts";else blocked=false;if ! printf "%s" "$loc"|grep -q "/title/";then blocked=true;fi;r=$(printf "%s" "$loc"|sed -n "s#.*/\([a-z][a-z]\)\(-[a-z][a-z]\)\?/.*#\1#p"|tr a-z A-Z);[ -n "$r" ]||r=n/a;printf "{\"service\":\"netflix\",\"part\":\"b\",\"blocked\":%s,\"region\":\"%s\",\"timestamp\":%s}\n" "$blocked" "$r" "$ts";fi'
 ```
 
 ---
@@ -127,7 +127,7 @@
 ### 5. Netflix IPv6 Part A
 
 ```
--c 'ts=$(($(date +%s)*1000));raw=$(curl -sSL --max-time 20 -6 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" -H "Accept-Language: en" -w "\n%{url_effective}" "https://www.netflix.com/title/81280792" 2>/dev/null||true);loc=$(printf "%s\n" "$raw"|tail -n1);body=$(printf "%s\n" "$raw"|sed "\$d");if [ -z "$body" ];then printf "{\"service\":\"netflix\",\"part\":\"a\",\"error\":\"empty response\",\"region\":\"n/a\",\"timestamp\":%s}\n" "$ts";else blocked=false;if printf "%s" "$body"|grep -q "Oh no!";then blocked=true;fi;r=$(printf "%s" "$loc"|sed -n "s#https\?://www\.netflix\.com/\([a-z][a-z]\)\(-[a-z][a-z]\)\?/.*#\1#p"|tr a-z A-Z);[ -n "$r" ]||r=n/a;printf "{\"service\":\"netflix\",\"part\":\"a\",\"blocked\":%s,\"region\":\"%s\",\"timestamp\":%s}\n" "$blocked" "$r" "$ts";fi'
+-c 'ts=$(($(date +%s)*1000));raw=$(curl -sSL --max-time 20 -6 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" -H "Accept-Language: en" -w "\n%{url_effective}" "https://www.netflix.com/title/81280792" 2>/dev/null||true);loc=$(printf "%s\n" "$raw"|tail -n1);body=$(printf "%s\n" "$raw"|sed "\$d");if [ -z "$body" ];then printf "{\"service\":\"netflix\",\"part\":\"a\",\"error\":\"empty response\",\"region\":\"n/a\",\"timestamp\":%s}\n" "$ts";else blocked=false;if ! printf "%s" "$loc"|grep -q "/title/";then blocked=true;fi;r=$(printf "%s" "$loc"|sed -n "s#.*/\([a-z][a-z]\)\(-[a-z][a-z]\)\?/.*#\1#p"|tr a-z A-Z);[ -n "$r" ]||r=n/a;printf "{\"service\":\"netflix\",\"part\":\"a\",\"blocked\":%s,\"region\":\"%s\",\"timestamp\":%s}\n" "$blocked" "$r" "$ts";fi'
 ```
 
 ---
@@ -135,7 +135,7 @@
 ### 6. Netflix IPv6 Part B
 
 ```
--c 'ts=$(($(date +%s)*1000));raw=$(curl -sSL --max-time 20 -6 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" -H "Accept-Language: en" -w "\n%{url_effective}" "https://www.netflix.com/title/70143836" 2>/dev/null||true);loc=$(printf "%s\n" "$raw"|tail -n1);body=$(printf "%s\n" "$raw"|sed "\$d");if [ -z "$body" ];then printf "{\"service\":\"netflix\",\"part\":\"b\",\"error\":\"empty response\",\"region\":\"n/a\",\"timestamp\":%s}\n" "$ts";else blocked=false;if printf "%s" "$body"|grep -q "Oh no!";then blocked=true;fi;r=$(printf "%s" "$loc"|sed -n "s#https\?://www\.netflix\.com/\([a-z][a-z]\)\(-[a-z][a-z]\)\?/.*#\1#p"|tr a-z A-Z);[ -n "$r" ]||r=n/a;printf "{\"service\":\"netflix\",\"part\":\"b\",\"blocked\":%s,\"region\":\"%s\",\"timestamp\":%s}\n" "$blocked" "$r" "$ts";fi'
+-c 'ts=$(($(date +%s)*1000));raw=$(curl -sSL --max-time 20 -6 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" -H "Accept-Language: en" -w "\n%{url_effective}" "https://www.netflix.com/title/70143836" 2>/dev/null||true);loc=$(printf "%s\n" "$raw"|tail -n1);body=$(printf "%s\n" "$raw"|sed "\$d");if [ -z "$body" ];then printf "{\"service\":\"netflix\",\"part\":\"b\",\"error\":\"empty response\",\"region\":\"n/a\",\"timestamp\":%s}\n" "$ts";else blocked=false;if ! printf "%s" "$loc"|grep -q "/title/";then blocked=true;fi;r=$(printf "%s" "$loc"|sed -n "s#.*/\([a-z][a-z]\)\(-[a-z][a-z]\)\?/.*#\1#p"|tr a-z A-Z);[ -n "$r" ]||r=n/a;printf "{\"service\":\"netflix\",\"part\":\"b\",\"blocked\":%s,\"region\":\"%s\",\"timestamp\":%s}\n" "$blocked" "$r" "$ts";fi'
 ```
 
 ---
@@ -144,7 +144,7 @@
 
 **YouTube**：`yes` 已解锁 · `noprem` 可访问但无 Premium · `cn` 命中中国页 · `bad` 异常 · `pending` 未完成。
 
-**Netflix**：`yes` 两页均未阻断（完全解锁） · `org` 两页均被 `Oh no!` 拦（仅自制剧） · `no` 一页阻断一页未阻断（异常） · `bad` 异常 · `pending` 未完成。
+**Netflix**：通过最终 URL 是否包含 `/title/` 判断是否重定向。`yes` 两页均未重定向（完全解锁） · `org` 两页均被重定向到首页（仅自制剧） · `no` 一页未重定向、一页被重定向（异常） · `bad` 异常 · `pending` 未完成。
 
 > 无 IPv6 出口的机器，其 `*IPv6` 项恒为 `bad`，属正常，前端可隐藏。
 

@@ -244,8 +244,8 @@ function buildNetflixExecuteScript(curlTimeout) {
     '  printf \'{"service":"netflix","part":"%s","error":"empty response","region":"n/a","timestamp":%s}\\n\' "$part" "$ts" > "$file"',
     "else",
     "  blocked=false",
-    "  if printf '%s' \"$body\" | grep -q 'Oh no!'; then blocked=true; fi",
-    '  region="$(printf \'%s\' "$loc" | sed -n \'s#https\\?://www\\.netflix\\.com/\\([a-z][a-z]\\)\\(-[a-z][a-z]\\)\\?/.*#\\1#p\' | tr \'a-z\' \'A-Z\')"',
+    "  if ! printf '%s' \"$loc\" | grep -q '/title/'; then blocked=true; fi",
+    '  region="$(printf \'%s\' "$loc" | sed -n \'s#.*/\\([a-z][a-z]\\)\\(-[a-z][a-z]\\)\\?/.*#\\1#p\' | tr \'a-z\' \'A-Z\')"',
     '  [ -n "$region" ] || region="n/a"',
     '  printf \'{"service":"netflix","part":"%s","blocked":%s,"region":"%s","timestamp":%s}\\n\' "$part" "$blocked" "$region" "$ts" > "$file"',
     "fi",
@@ -384,7 +384,9 @@ function parseNetflixTasks(taskA, taskB) {
       error: (rowA.error || "") + (rowB.error ? " | " + rowB.error : ""),
     };
   }
-  var region = rowB.region || rowA.region || "n/a";
+  var regionA = rowA.region || "n/a";
+  var regionB = rowB.region || "n/a";
+  var region = regionB !== "n/a" ? regionB : regionA;
   var blockedA = rowA.blocked === true;
   var blockedB = rowB.blocked === true;
   var ts =
